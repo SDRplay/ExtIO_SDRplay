@@ -1770,9 +1770,7 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 			{
 				chosenDevice = i;
 				chosenDev = &devices[chosenDevice];
-#ifdef DEBUG_ENABLE
-				chosenDev->heartBeatDisabled = 1;
-#endif
+
 				if (chosenDev->rspDuoMode & sdrplay_api_RspDuoMode_Master || chosenDev->rspDuoMode & sdrplay_api_RspDuoMode_Dual_Tuner || chosenDev->rspDuoMode & sdrplay_api_RspDuoMode_Single_Tuner)
 				{	// Single Tuner
 					ModeIdx = 0;
@@ -2095,7 +2093,7 @@ long LIBSDRplay_API __stdcall SetHWLO(unsigned long freq)
 		chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
 		if (Running)
 		{
-			err = sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect);
+			err = sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
 			if (err != sdrplay_api_Success)
 			{
 				OutputDebugString("AM Port Update error");
@@ -2139,7 +2137,7 @@ long LIBSDRplay_API __stdcall SetHWLO(unsigned long freq)
 	chParams->tunerParams.rfFreq.rfHz = freq;
 	if (Running)
 	{
-		err = sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_Frf);
+		err = sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_Frf, sdrplay_api_Update_Ext1_None);
 		if (err != sdrplay_api_Success)
 		{
 			OutputDebugString("Frequency program error");
@@ -2197,7 +2195,7 @@ void eventCallback(sdrplay_api_EventT eventId, sdrplay_api_TunerSelectT tunerS, 
 		break;
 	case sdrplay_api_PowerOverloadChange:
 
-		sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Ctrl_OverloadMsgAck);
+		sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Ctrl_OverloadMsgAck, sdrplay_api_Update_Ext1_None);
 
 		if (params->powerOverloadParams.powerOverloadChangeType == sdrplay_api_Overload_Detected)
 		{
@@ -2405,7 +2403,7 @@ bool LIBSDRplay_API __stdcall IQCompensation(bool Enable)
 
 	chParams->ctrlParams.dcOffset.DCenable = (unsigned int)Enable;
 	chParams->ctrlParams.dcOffset.IQenable = (unsigned int)Enable;
-	Error = sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Ctrl_DCoffsetIQimbalance);
+	Error = sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Ctrl_DCoffsetIQimbalance, sdrplay_api_Update_Ext1_None);
 	if (Error != sdrplay_api_Success)
 	{
 #ifdef DEBUG_ENABLE
@@ -2581,7 +2579,7 @@ void station_copy(station *dest, station *src)
 char * dayOfTheWeek()
 {
 	const string DAY[] = { "Su", "Mo", "Tu", "We", "Th", "Fr", "Sa" };
-	char *ret;
+	char *ret = NULL;
 	time_t rawtime;
 	tm timeinfo;
 	::time(&rawtime);
@@ -4588,7 +4586,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 				}
 				else
 				{
-					sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_Gr);
+					sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_Gr, sdrplay_api_Update_Ext1_None);
 				}
 				sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
 				Edit_SetText(GetDlgItem(hwndDlg, IDC_TOTALGR), str);
@@ -4611,7 +4609,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 				chParams->tunerParams.gain.LNAstate = (unsigned char)LNAGainReduction;
 				if (Running)
 				{
-					sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_Gr);
+					sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_Gr, sdrplay_api_Update_Ext1_None);
 				}
 				sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
 				Edit_SetText(GetDlgItem(hwndDlg, IDC_TOTALGR), str);
@@ -4692,7 +4690,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 					chParams->tunerParams.ifType = sdrplay_api_IF_1_620;
 
 				if (Running)
-					sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_IfType);
+					sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_IfType, sdrplay_api_Update_Ext1_None);
 
 				SampleRateIdx = 0; // Always 2.0 MHz
 
@@ -5032,14 +5030,14 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 							biasTEnable = 1;
 							chParams->rspDuoTunerParams.biasTEnable = (unsigned char)biasTEnable;
 							if (Running)
-								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_BiasTControl);
+								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_BiasTControl, sdrplay_api_Update_Ext1_None);
 						}
 						else
 						{
 							biasTEnable = 0;
 							chParams->rspDuoTunerParams.biasTEnable = (unsigned char)biasTEnable;
 							if (Running)
-								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_BiasTControl);
+								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_BiasTControl, sdrplay_api_Update_Ext1_None);
 						}
 					}
 					return true;
@@ -5056,14 +5054,14 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 							refClkEnable = 1;
 							deviceParams->devParams->rspDuoParams.extRefOutputEn = refClkEnable;
 							if (Running)
-								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_ExtRefControl);
+								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_ExtRefControl, sdrplay_api_Update_Ext1_None);
 						}
 						else
 						{
 							refClkEnable = 0;
 							deviceParams->devParams->rspDuoParams.extRefOutputEn = refClkEnable;
 							if (Running)
-								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_ExtRefControl);
+								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_ExtRefControl, sdrplay_api_Update_Ext1_None);
 						}
 					}
 					return true;
@@ -5080,14 +5078,14 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 							notchEnable = 1;
 							chParams->rspDuoTunerParams.rfNotchEnable = (unsigned char)notchEnable;
 							if (Running)
-								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_RfNotchControl);
+								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_RfNotchControl, sdrplay_api_Update_Ext1_None);
 						}
 						else
 						{
 							notchEnable = 0;
 							chParams->rspDuoTunerParams.rfNotchEnable = (unsigned char)notchEnable;
 							if (Running)
-								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_RfNotchControl);
+								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_RfNotchControl, sdrplay_api_Update_Ext1_None);
 						}
 					}
 					return true;
@@ -5104,14 +5102,14 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 							dabNotchEnable = 1;
 							chParams->rspDuoTunerParams.rfDabNotchEnable = (unsigned char)dabNotchEnable;
 							if (Running)
-								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_RfDabNotchControl);
+								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_RfDabNotchControl, sdrplay_api_Update_Ext1_None);
 						}
 						else
 						{
 							dabNotchEnable = 0;
 							chParams->rspDuoTunerParams.rfDabNotchEnable = (unsigned char)dabNotchEnable;
 							if (Running)
-								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_RfDabNotchControl);
+								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_RfDabNotchControl, sdrplay_api_Update_Ext1_None);
 						}
 					}
 					return true;
@@ -5142,7 +5140,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 						}
 						if (Running)
 						{
-							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Ctrl_Agc);
+							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Ctrl_Agc, sdrplay_api_Update_Ext1_None);
 						}
 					}
 					return true;
@@ -5161,7 +5159,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 						chParams->ctrlParams.agc.setPoint_dBfs = AGCsetpoint;
 					}
 					if (Running)
-						sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Ctrl_Agc);
+						sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Ctrl_Agc, sdrplay_api_Update_Ext1_None);
 					return true;
 				}
 				break;
@@ -5178,7 +5176,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 
 					DeltaPosClick = false;
 					if (Running)
-						sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Dev_Ppm);
+						sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Dev_Ppm, sdrplay_api_Update_Ext1_None);
 					return true;
 				}
 				break;
@@ -5210,7 +5208,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 						}
 						if (Running)
 						{
-							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect);
+							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
 						}
 						sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, chParams->rspDuoTunerParams.tuner1AmPortSel);
 					}
@@ -5224,7 +5222,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 						SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
 						if (Running)
 						{
-							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect);
+							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
 						}
 						sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, chParams->rspDuoTunerParams.tuner1AmPortSel);
 					}
@@ -5255,7 +5253,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 
 								if (Running)
 								{
-									sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect);
+									sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
 								}
 							}
 							else
@@ -5265,7 +5263,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 
 								if (Running)
 								{
-									sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect);
+									sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
 								}
 							}
 						}
@@ -5277,7 +5275,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 
 							if (Running)
 							{
-								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect);
+								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
 							}
 						}
 						return true;
@@ -5313,9 +5311,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 								chosenDev->tuner = sdrplay_api_Tuner_A;
 							else
 								chosenDev->tuner = sdrplay_api_Tuner_B;
-#ifdef DEBUG_ENABLE
-							chosenDev->heartBeatDisabled = 1;
-#endif
+
 							chosenDev->rspDuoMode = sdrplay_api_RspDuoMode_Single_Tuner;
 
 							if (oldModeIdx == 2)
@@ -5411,9 +5407,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 							chosenDev->tuner = sdrplay_api_Tuner_A;
 						else
 							chosenDev->tuner = sdrplay_api_Tuner_B;
-#ifdef DEBUG_ENABLE
-						chosenDev->heartBeatDisabled = 1;
-#endif
+
 						chosenDev->rspDuoMode = sdrplay_api_RspDuoMode_Master;
 
 						chosenDev->rspDuoSampleFreq = 6000000.0;
@@ -5491,9 +5485,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 							chosenDev->tuner = sdrplay_api_Tuner_A;
 						else
 							chosenDev->tuner = sdrplay_api_Tuner_B;
-#ifdef DEBUG_ENABLE
-						chosenDev->heartBeatDisabled = 1;
-#endif
+
 						chosenDev->rspDuoMode = sdrplay_api_RspDuoMode_Master;
 
 						chosenDev->rspDuoSampleFreq = 8000000.0;
@@ -5752,7 +5744,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 					chParams->tunerParams.bwType = Bandwidth;
 
 					if (Running)
-						sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_BwType);
+						sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_BwType, sdrplay_api_Update_Ext1_None);
 
 				}
 				break;
@@ -5979,7 +5971,7 @@ static INT_PTR CALLBACK AdvancedDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
 			   chParams->tunerParams.dcOffsetTuner.dcCal = (unsigned char)DcCompensationMode;
 			   chParams->tunerParams.dcOffsetTuner.speedUp = 0;
 			   if (Running)
-				   sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_DcOffset);
+				   sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_DcOffset, sdrplay_api_Update_Ext1_None);
             }
          }
 			return true;
@@ -7440,7 +7432,7 @@ void Update_IFBW(void)
 	Bandwidth = bandwidths[BandwidthIdx].bwType;
 	chParams->tunerParams.bwType = Bandwidth;
 	if (Running)
-		sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_BwType);
+		sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_BwType, sdrplay_api_Update_Ext1_None);
 }
 
 void Reset_SAMPLERATE(HWND hwndDlg)
