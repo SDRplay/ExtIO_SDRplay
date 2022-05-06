@@ -2437,7 +2437,7 @@ int LIBSDRplay_API __stdcall StartHW(unsigned long freq)
 		WinradCallBack(-1, WINRAD_LOCHANGE, 0, NULL);
 		return -1;
 	}
-	sdrplay_api_DebugEnable_fn(chosenDev->dev, RSP_DEBUG);
+	sdrplay_api_DebugEnable_fn(chosenDev->dev, (sdrplay_api_DbgLvl_t)RSP_DEBUG);
 	chParams->tunerParams.loMode = GetLoMode();
 	if ((chosenDev->rspDuoMode & sdrplay_api_RspDuoMode_Master && !slaveAttached) || chosenDev->rspDuoMode & sdrplay_api_RspDuoMode_Single_Tuner)
 		deviceParams->devParams->ppm = (float)FqOffsetPPM;
@@ -5212,6 +5212,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
 						}
 						sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, chParams->rspDuoTunerParams.tuner1AmPortSel);
+						chParams = (chosenDev->tuner == sdrplay_api_Tuner_A) ? deviceParams->rxChannelA : deviceParams->rxChannelB;
 					}
 					else if (TunerIdx == 1 && chosenDev->tuner != sdrplay_api_Tuner_B) // Tuner 2
 					{
@@ -5226,6 +5227,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
 						}
 						sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, chParams->rspDuoTunerParams.tuner1AmPortSel);
+						chParams = (chosenDev->tuner == sdrplay_api_Tuner_A) ? deviceParams->rxChannelA : deviceParams->rxChannelB;
 					}
 					return true;
 				}
