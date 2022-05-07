@@ -1892,7 +1892,7 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 		return false;
 	}
 
-	chParams = (chosenDev->tuner == sdrplay_api_Tuner_A) ? deviceParams->rxChannelA : deviceParams->rxChannelB;
+	chParams = (chosenDev->tuner == sdrplay_api_Tuner_B) ? deviceParams->rxChannelB : deviceParams->rxChannelA;
 
 	error = RegOpenKeyEx(HKEY_CURRENT_USER, TEXT("Software\\SDRplay\\RSPduo_Settings"), 0, KEY_ALL_ACCESS, &Settingskey);
 	if (error == ERROR_SUCCESS)
@@ -4043,7 +4043,8 @@ void LoadSettings()
 			refClkEnable = 0;
 		}
 
-		if (chosenDev->rspDuoMode != sdrplay_api_RspDuoMode_Slave)
+		// Do not mess with the tuner selection made in the hardware
+		if (FALSE) //chosenDev->rspDuoMode != sdrplay_api_RspDuoMode_Slave)
 		{
 			error = RegQueryValueEx(Settingskey, "TunerIdx", NULL, NULL, (LPBYTE)&TunerIdx, &IntSz);
 			if (error != ERROR_SUCCESS)
@@ -5192,42 +5193,44 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 #endif
 					if (TunerIdx == 0 && chosenDev->tuner != sdrplay_api_Tuner_A) // Tuner 1
 					{
-						Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 1);
+						sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, chParams->rspDuoTunerParams.tuner1AmPortSel);
+						chParams = (chosenDev->tuner == sdrplay_api_Tuner_B) ? deviceParams->rxChannelB : deviceParams->rxChannelA;
+
 						// LNA Gain Reduction change limit
 						SendMessage(GetDlgItem(hwndDlg, IDC_LNASLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)LNA_GAIN_SLIDER_MAX);
-						if (HiZPort == 0 || Frequency >= 30.0)
-						{
-							chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
-							Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 1);
-							SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
-						}
-						else
-						{
-							Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 1);
-							SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
-							chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_1;
-						}
+
+						// HiZ port present
+						Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 1);
+						SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
+
+						chParams->rspDuoTunerParams.tuner1AmPortSel = (HiZPort == 0 || Frequency >= 30.0)?
+							sdrplay_api_RspDuo_AMPORT_2 : sdrplay_api_RspDuo_AMPORT_1;
 						if (Running)
 						{
 							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
 						}
-						sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, chParams->rspDuoTunerParams.tuner1AmPortSel);
-						chParams = (chosenDev->tuner == sdrplay_api_Tuner_A) ? deviceParams->rxChannelA : deviceParams->rxChannelB;
 					}
 					else if (TunerIdx == 1 && chosenDev->tuner != sdrplay_api_Tuner_B) // Tuner 2
 					{
-						Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 0);
+						// Swap tuners
+						sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, chParams->rspDuoTunerParams.tuner1AmPortSel);
+						chParams = (chosenDev->tuner == sdrplay_api_Tuner_B) ? deviceParams->rxChannelB : deviceParams->rxChannelA;
+
 						// LNA Gain Reduction change limit
 						SendMessage(GetDlgItem(hwndDlg, IDC_LNASLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)LNA_GAIN_SLIDER_MAX);
-						chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
+
+						// No HiZ port
 						HiZPort = 0;
+						Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 0);
 						SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
+
+						chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
+						chParams->rspDuoTunerParams.biasTEnable = (unsigned char)biasTEnable;
 						if (Running)
 						{
 							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
+							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_BiasTControl, sdrplay_api_Update_Ext1_None);
 						}
-						sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, chParams->rspDuoTunerParams.tuner1AmPortSel);
-						chParams = (chosenDev->tuner == sdrplay_api_Tuner_A) ? deviceParams->rxChannelA : deviceParams->rxChannelB;
 					}
 					return true;
 				}
@@ -5340,7 +5343,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 								OutputDebugString(str);
 							}
 
-							chParams = (chosenDev->tuner == sdrplay_api_Tuner_A) ? deviceParams->rxChannelA : deviceParams->rxChannelB;
+							chParams = (chosenDev->tuner == sdrplay_api_Tuner_B) ? deviceParams->rxChannelB : deviceParams->rxChannelA;
 							Bandwidth = sdrplay_api_BW_1_536;
 							chParams->tunerParams.bwType = Bandwidth;
 							IFMode = sdrplay_api_IF_1_620;
@@ -5429,7 +5432,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 							OutputDebugString(str);
 						}
 
-						chParams = (chosenDev->tuner == sdrplay_api_Tuner_A) ? deviceParams->rxChannelA : deviceParams->rxChannelB;
+						chParams = (chosenDev->tuner == sdrplay_api_Tuner_B) ? deviceParams->rxChannelB : deviceParams->rxChannelA;
 						Bandwidth = sdrplay_api_BW_1_536;
 						chParams->tunerParams.bwType = Bandwidth;
 						IFMode = sdrplay_api_IF_1_620;
@@ -5507,7 +5510,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 							OutputDebugString(str);
 						}
 
-						chParams = (chosenDev->tuner == sdrplay_api_Tuner_A) ? deviceParams->rxChannelA : deviceParams->rxChannelB;
+						chParams = (chosenDev->tuner == sdrplay_api_Tuner_B) ? deviceParams->rxChannelB : deviceParams->rxChannelA;
 						Bandwidth = sdrplay_api_BW_1_536;
 						chParams->tunerParams.bwType = Bandwidth;
 						IFMode = sdrplay_api_IF_2_048;
@@ -6897,11 +6900,13 @@ void LoadProfile(int profile)
 
 		// Tuner
 		ReadFile(hFile, &TunerIdx, sizeof(TunerIdx), &nBytesWritten, NULL);
+		// Do not mess with the tuner selection made in the hardware
+		TunerIdx = chosenDev->tuner == sdrplay_api_Tuner_B? 1 : 0
 		ComboBox_SetCurSel(GetDlgItem(h_dialog, IDC_TUNERSELECT), TunerIdx);
-		if (TunerIdx == 0)
-			chosenDev->tuner = sdrplay_api_Tuner_A;
-		else if (TunerIdx == 1)
-			chosenDev->tuner = sdrplay_api_Tuner_B;
+//		if (TunerIdx == 0)
+//			chosenDev->tuner = sdrplay_api_Tuner_A;
+//		else if (TunerIdx == 1)
+//			chosenDev->tuner = sdrplay_api_Tuner_B;
 
 		// HiZ Port
 		ReadFile(hFile, &HiZPort, sizeof(HiZPort), &nBytesWritten, NULL);
