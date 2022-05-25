@@ -1756,7 +1756,7 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 
 #ifdef DEBUG_ENABLE
 	OutputDebugString("Get Device Information...");
-	sdrplay_api_DebugEnable_fn(NULL, RSP_DEBUG);
+	sdrplay_api_DebugEnable_fn(NULL, (sdrplay_api_DbgLvl_t)RSP_DEBUG);
 #endif
 	bool foundRSPdx = false;
 	sdrplay_api_GetDevices_fn(devices, &numDevs, MAXNUMOFDEVS);
@@ -2406,7 +2406,7 @@ int LIBSDRplay_API __stdcall StartHW(unsigned long freq)
 		WinradCallBack(-1, WINRAD_LOCHANGE, 0, NULL);
 		return -1;
 	}
-	sdrplay_api_DebugEnable_fn(chosenDev->dev, RSP_DEBUG);
+	sdrplay_api_DebugEnable_fn(chosenDev->dev, (sdrplay_api_DbgLvl_t)RSP_DEBUG);
 	chParams->tunerParams.loMode = GetLoMode();
 	deviceParams->devParams->ppm = (float)FqOffsetPPM;
 
@@ -6762,7 +6762,10 @@ void Reset_SAMPLERATE(HWND hwndDlg)
 	char str[255];
 	HWND srMenu = GetDlgItem(hwndDlg, IDC_SAMPLERATE);
 
-	SampleRateIdx = 0;
+	if (SampleRateIdx < 0 || SampleRateIdx > 8)
+	{
+		SampleRateIdx = 0;
+	}
 
 	Edit_Enable(srMenu, 1);
 	ComboBox_ResetContent(srMenu);
