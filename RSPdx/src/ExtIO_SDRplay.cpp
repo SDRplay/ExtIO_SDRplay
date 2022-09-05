@@ -1,8 +1,9 @@
 
 /* *******************************************************************************/
 /*					EXTIO Plugin Interface for SDRplay RSPdx					 */
-/*									V1.0 build 0107								 */
-/* Version 1.0 supports API 3.06                                                 */
+/*									V1.2 build 0902								 */
+/* Version 1.2 built against API 3.11											 */
+/* Version 1.0 built against API 3.06                                            */
 /*********************************************************************************/
 
 #include <WinSock2.h>
@@ -108,8 +109,6 @@ int *pZERO = &zero;                 // used to pass int pointer to Reinit where 
 sdrplay_api_If_kHzT IFMode = sdrplay_api_IF_Zero;
 sdrplay_api_Bw_MHzT Bandwidth = sdrplay_api_BW_1_536;
 sdrplay_api_LoModeT LOMode = sdrplay_api_LO_Auto;
-int ModeIdx = 0;
-unsigned char hwVersion = 0;
 int notchEnable = 0;
 int biasTEnable = 0;
 int dabNotchEnable = 0;
@@ -1878,6 +1877,7 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 		else
 			workOffline = false;
 
+
 		if (stationLookup)
 		{
 			if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA | CSIDL_FLAG_CREATE, NULL, 0, csvPath)))
@@ -2414,7 +2414,7 @@ int LIBSDRplay_API __stdcall StartHW(unsigned long freq)
     OutputDebugString("Calling Init");
 #endif
 	
-	if (Frequency >= 200.0 && AntennaIdx == 2) // i.e. greater than 30MHz and HiZ port in use, then revert to port A
+	if (Frequency >= 200.0 && AntennaIdx == 2) // i.e. greater than 200MHz and port C in use, then revert to port A
 	{
 		// LNA Gain Reduction change limit
 
@@ -3803,10 +3803,8 @@ void LoadSettings()
 			OutputDebugString("Failed to recall saved IF mode");
 #endif
 			IFmodeIdx = 1;
-			Edit_Enable(GetDlgItem(h_dialog, IDC_IFMODE), 1);
 		}
-		else
-			Edit_Enable(GetDlgItem(h_dialog, IDC_IFMODE), 1);
+		Edit_Enable(GetDlgItem(h_dialog, IDC_IFMODE), 1);
 
 		error = RegQueryValueEx(Settingskey, "FreqTrim", NULL, NULL, (LPBYTE)&FqOffsetPPM, &IntSz);
 		if (error != ERROR_SUCCESS)
@@ -4417,8 +4415,8 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 
 			ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_IFMODE), IFmodeIdx);
 
-			if (IFmodeIdx == 1 && ModeIdx != 0)
-				Edit_Enable(GetDlgItem(hwndDlg, IDC_IFMODE), 0);
+			if (IFmodeIdx == 1)
+				Edit_Enable(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 0);
 
 			//Add Filter BW based on IF mode Selection then select stored BW.
 			ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_IFBW));
@@ -4503,7 +4501,6 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 				_stprintf_s(str, 255, "32");
 				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
 			}
-
 
 			ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_DECIMATION), DecimationIdx);
 
@@ -5098,22 +5095,11 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 					}
 					else
 					{
-						if (ModeIdx == 2) // ADS-B
-						{
 #ifdef DEBUG_ENABLE
-							OutputDebugString("IFmodeIdx: 1, ModeIdx: 2");
+						OutputDebugString("IFmodeIdx: 1");
 #endif
-							IFMode = sdrplay_api_IF_2_048;
-							chParams->tunerParams.ifType = IFMode;
-						}
-						else
-						{
-#ifdef DEBUG_ENABLE
-							OutputDebugString("IFmodeIdx: 1, ModeIdx: 0/1");
-#endif
-							IFMode = sdrplay_api_IF_1_620;
-							chParams->tunerParams.ifType = IFMode;
-						}
+						IFMode = sdrplay_api_IF_1_620;
+						chParams->tunerParams.ifType = IFMode;
 					}
 
 					Reset_SAMPLERATE(hwndDlg);
@@ -5945,11 +5931,11 @@ static INT_PTR CALLBACK ProfilesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
 
 						WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
 
-                  if (Running)
-                  {
-                     ReinitAll();
-					 UpdateSR();
-                  }
+						if (Running)
+						{
+							ReinitAll();
+							UpdateSR();
+						}
 
 						// DC compensation mode
 						ReadFile(hFile, &DcCompensationMode, sizeof(DcCompensationMode), &nBytesWritten, NULL);
@@ -6728,30 +6714,47 @@ void Update_IFBW(void)
 		ComboBox_AddString(ifbwMenu, str);
 	}
 
-	for (BandwidthIdx = 0; BandwidthIdx < bwArraySize; BandwidthIdx++)
+	int bot;
+	double _sr;
+	if (IFmodeIdx == 0)
 	{
-		if ((samplerates[SampleRateIdx].value / Decimation[DecimationIdx].DecValue)  < bandwidths[BandwidthIdx].BW)
+		_sr = samplerates[SampleRateIdx].value;
+	}
+	else
+	{
+		_sr = 2.0;
+	}
+	int _dec = Decimation[DecimationIdx].DecValue;
+	if (_dec < 1) _dec = 1;
+
+	for (bot = (bwArraySize - 1); bot >= 0; bot--)
+	{
+		if ((_sr / _dec) >= bandwidths[bot].BW)
 		{
-			BandwidthIdx--;
-			if (BandwidthIdx < (bwArraySize - 1))
-			{
-				for (int i = (bwArraySize - 1); i > BandwidthIdx; i--)
-				{
-					ComboBox_DeleteString(ifbwMenu, i);
-				}
-			}
+#ifdef DEBUG_ENABLE
+			_stprintf_s(str, 255, "Update_IFBW: bot: %d, _sr: %f, _dec: %d, bw: %f", bot, _sr, _dec, bandwidths[bot].BW);
+			OutputDebugString(str);
+#endif
 			break;
+		}
+		else
+		{
+#ifdef DEBUG_ENABLE
+			_stprintf_s(str, 255, "Update_IFBW: remove %d", bot);
+			OutputDebugString(str);
+#endif
+			ComboBox_DeleteString(ifbwMenu, bot);
 		}
 	}
 
-	if (BandwidthIdx >= bwArraySize)
-		BandwidthIdx = bwArraySize - 1;
-
-	ComboBox_SetCurSel(ifbwMenu, BandwidthIdx);
+	ComboBox_SetCurSel(ifbwMenu, bot);
+	BandwidthIdx = bot;
 	Bandwidth = bandwidths[BandwidthIdx].bwType;
 	chParams->tunerParams.bwType = Bandwidth;
-	if (Running)
-		sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_BwType, sdrplay_api_Update_Ext1_None);
+#ifdef DEBUG_ENABLE
+	_stprintf_s(str, 255, "Update_IFBW: bwType: %d", (int)chParams->tunerParams.bwType);
+	OutputDebugString(str);
+#endif
 }
 
 void Reset_SAMPLERATE(HWND hwndDlg)
@@ -6805,6 +6808,7 @@ void Reset_SAMPLERATE(HWND hwndDlg)
 	else
 	{
 		deviceParams->devParams->fsFreq.fsHz = 6000000.0;
+		SampleRateIdx = 0; // 2.0 MHz
 	}
 }
 
@@ -6855,8 +6859,6 @@ void Reset_IFBW()
 	char str[255];
 	HWND ifbwMenu = GetDlgItem(h_dialog, IDC_IFBW);
 
-	BandwidthIdx = 3; // 1536 kHz default BW
-
 	ComboBox_ResetContent(ifbwMenu);
 	_stprintf_s(str, 255, "200 kHz");
 	ComboBox_AddString(ifbwMenu, str);
@@ -6879,9 +6881,18 @@ void Reset_IFBW()
 		_stprintf_s(str, 255, "8.000 MHz");
 		ComboBox_AddString(ifbwMenu, str);
 	}
+
+	BandwidthIdx = 3; // 1536 kHz default BW
+
 	ComboBox_SetCurSel(ifbwMenu, BandwidthIdx);
 
-	chParams->tunerParams.bwType = sdrplay_api_BW_1_536;
+	Bandwidth = bandwidths[BandwidthIdx].bwType;
+	chParams->tunerParams.bwType = Bandwidth;
+
+#ifdef DEBUG_ENABLE
+	_stprintf_s(str, 255, "Reset_IFBW: bwType: %d", (int)chParams->tunerParams.bwType);
+	OutputDebugString(str);
+#endif
 }
 
 void UpdateSR(void)

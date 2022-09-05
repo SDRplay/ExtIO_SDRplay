@@ -1,7 +1,8 @@
 
 /* *******************************************************************************/
 /*					EXTIO Plugin Interface for SDRplay RSP1						 */
-/*									V4.1										 */
+/*									V5.0 build 0902								 */
+/* Version 5.0 built against API 3.11											 */	
 /*********************************************************************************/
 
 #include <WinSock2.h>
@@ -21,7 +22,7 @@
 #include <vector>
 #include "resource.h"
 #include "ExtIO_SDRplay.h"
-#include "mir_sdr.h"
+#include "sdrplay_api.h"
 #include <sys/types.h>
 #include <sys/timeb.h>
 #include <ctime>
@@ -42,9 +43,22 @@ using namespace std;
 
 #define NOT_USED(p) ((void)(p))
 
-#define MAXNUMOFDEVS 4
-mir_sdr_DeviceT devices[4];
+#define MAXNUMOFDEVS 16
+sdrplay_api_DeviceT devices[MAXNUMOFDEVS];
+sdrplay_api_DeviceT* chosenDev;
+sdrplay_api_CallbackFnsT cbFns;
+int chosenDevice;
 unsigned int numDevs;
+
+sdrplay_api_DeviceParamsT* deviceParams;
+sdrplay_api_RxChannelParamsT* chParams;
+
+#define GAIN_SLIDER_MIN (20)
+#define GAIN_SLIDER_MAX (59)
+#define INITIAL_GR      (41)
+
+#define LNA_GAIN_SLIDER_MIN (0)
+#define LNA_GAIN_SLIDER_MAX (3)
 
 #define EXTIO_HWTYPE_16B 3
 #define LO120MHz 24576000
@@ -84,18 +98,20 @@ float FqOffsetPPM = 0;
 volatile int GainReduction = 40;		// variables accessed from different threads should be volatile!
 volatile int LNAGainReduction = 0;
 int SystemGainReduction;
+int ActualLNAGR = 0;
 int zero = 0;
 int *pZERO = &zero;                 // used to pass int pointer to Reinit where the value isn't used or the return value isn't significant
-mir_sdr_If_kHzT IFMode = mir_sdr_IF_Zero;
-mir_sdr_Bw_MHzT Bandwidth = mir_sdr_BW_1_536;
-mir_sdr_LoModeT LOMode = mir_sdr_LO_Auto;
+sdrplay_api_If_kHzT IFMode = sdrplay_api_IF_Zero;
+sdrplay_api_Bw_MHzT Bandwidth = sdrplay_api_BW_1_536;
+sdrplay_api_LoModeT LOMode = sdrplay_api_LO_Auto;
+bool slaveAttached = false;
 
 volatile int BandwidthIdx = 3;
 
 int DecimationIdx = 0;
 
 int AGCsetpoint = -30;
-mir_sdr_AgcControlT AGCEnabled = mir_sdr_AGC_5HZ;
+bool AGCEnabled = true;
 int down_conversion_enabled = 1;
 int LOplan = LO120MHz;
 bool LOplanAuto = true;
@@ -112,7 +128,6 @@ double FreqOffsetInvSpec = 0.0;
 int SampleCount = 0;				// number of I/Q frames
 static bool loadedProfiles = false;
 static bool definedHotkeys = false;
-static bool LNAEnable = true;
 static unsigned int LnaGr = 0;
 static char stationTTipText[8192];
 static bool displayStationTip = false;
@@ -128,7 +143,7 @@ volatile int ThreadExitFlag = 0;
 bool Initiated = false;
 bool Running = false;
 static int ppm_default=0;
-int SampleRateIdx = 0;
+int SampleRateIdx = 3; // 2.0 MHz
 char demodMode;
 int DecimateEnable = 0;
 int DecimateFactor = 0;
@@ -170,19 +185,19 @@ static sr_t samplerates[] = {
 };
 
 struct bw_t {
-	mir_sdr_Bw_MHzT bwType;
+	sdrplay_api_Bw_MHzT bwType;
 	double			BW;
 };
 
 static bw_t bandwidths[] = {
-	{ mir_sdr_BW_0_200, 0.2   },
-	{ mir_sdr_BW_0_300, 0.3   },
-	{ mir_sdr_BW_0_600, 0.6   },
-	{ mir_sdr_BW_1_536, 1.536 },
-	{ mir_sdr_BW_5_000, 5.000 },
-	{ mir_sdr_BW_6_000, 6.000 },
-	{ mir_sdr_BW_7_000, 7.000 },
-	{ mir_sdr_BW_8_000, 8.000 }
+	{ sdrplay_api_BW_0_200, 0.2   },
+	{ sdrplay_api_BW_0_300, 0.3   },
+	{ sdrplay_api_BW_0_600, 0.6   },
+	{ sdrplay_api_BW_1_536, 1.536 },
+	{ sdrplay_api_BW_5_000, 5.000 },
+	{ sdrplay_api_BW_6_000, 6.000 },
+	{ sdrplay_api_BW_7_000, 7.000 },
+	{ sdrplay_api_BW_8_000, 8.000 }
 };
 
 TCHAR p1fname[MAX_PATH] = _T("");
@@ -1063,62 +1078,33 @@ static lang languageCodes[] = {
 	{"ZWE", "Languages of Zimbabwe", "[]" }
 };
 
-static int n_gains = 60;
+static int n_gains = ((GAIN_SLIDER_MAX - GAIN_SLIDER_MIN) + 1);
+static int gains[((GAIN_SLIDER_MAX - GAIN_SLIDER_MIN) + 1)];
 static int last_gain;
-static int *gains;
-
-
-#define NUM_BANDS	8            //  0				1			2			3			4			5	        6			7       
-const double band_fmin[NUM_BANDS] = { 0.01,			12.0, 		30.0,		60.0,		120.0,		250.0,		420.0,		1000.0	};
-const double band_fmax[NUM_BANDS] = { 11.999999,	29.999999,  59.999999,	119.999999,	249.999999,	419.999999,	999.999999, 2000.0	};
-const int band_LNAgain[NUM_BANDS] = { 24,			24,			24,			24,			24,			24,			 7,			 5		};
-const int band_MIXgain[NUM_BANDS] = { 19,			19,			19,			19,			19,			19,			19,			19		};
-const int band_fullTune[NUM_BANDS]= {  1,			 1,			 1,			 1,			 1,			 1,			 1,			 1		};
-const int band_MinGR[NUM_BANDS] =   {  0,			 0,			 0,		  	 0,			 0,			 0,			12,			14		}; // LNA OFF (LNA ON = 19)
-const int band_MaxGR[NUM_BANDS] =   { 78,			78,			78,			78,			78,			78,			78,			78		}; // new gain map
-
 
 static HMODULE ApiDll = NULL;
 HMODULE Dll = NULL;
 
-mir_sdr_Init_t								mir_sdr_Init_fn = NULL;
-mir_sdr_Uninit_t							mir_sdr_Uninit_fn = NULL;
-mir_sdr_ReadPacket_t						mir_sdr_ReadPacket_fn = NULL;
-mir_sdr_SetRf_t								mir_sdr_SetRf_fn = NULL;
-mir_sdr_SetFs_t								mir_sdr_SetFs_fn = NULL;
-mir_sdr_SetGr_t								mir_sdr_SetGr_fn = NULL;
-mir_sdr_SetGrParams_t						mir_sdr_SetGrParams_fn = NULL;
-mir_sdr_SetDcMode_t							mir_sdr_SetDcMode_fn = NULL;
-mir_sdr_SetDcTrackTime_t					mir_sdr_SetDcTrackTime_fn = NULL;
-mir_sdr_SetSyncUpdateSampleNum_t			mir_sdr_SetSyncUpdateSampleNum_fn = NULL;
-mir_sdr_SetSyncUpdatePeriod_t				mir_sdr_SetSyncUpdatePeriod_fn = NULL;
-mir_sdr_ApiVersion_t						mir_sdr_ApiVersion_fn = NULL;
-mir_sdr_ResetUpdateFlags_t					mir_sdr_ResetUpdateFlags_fn = NULL;
-mir_sdr_DownConvert_t						mir_sdr_DownConvert_fn = NULL;
-mir_sdr_SetParam_t							mir_sdr_SetParam_fn = NULL;
-mir_sdr_SetPpm_t							mir_sdr_SetPpm_fn = NULL;
-mir_sdr_SetLoMode_t							mir_sdr_SetLoMode_fn = NULL;
-mir_sdr_SetGrAltMode_t						mir_sdr_SetGrAltMode_fn = NULL;
-mir_sdr_DCoffsetIQimbalanceControl_t		mir_sdr_DCoffsetIQimbalanceControl_fn = NULL;
-mir_sdr_DecimateControl_t					mir_sdr_DecimateControl_fn = NULL;
-mir_sdr_AgcControl_t						mir_sdr_AgcControl_fn = NULL;
-mir_sdr_StreamInit_t						mir_sdr_StreamInit_fn = NULL;
-mir_sdr_StreamUninit_t						mir_sdr_StreamUninit_fn = NULL;
-mir_sdr_Reinit_t						    mir_sdr_Reinit_fn = NULL;
-mir_sdr_GetGrByFreq_t					    mir_sdr_GetGrByFreq_fn = NULL;
-mir_sdr_DebugEnable_t						mir_sdr_DebugEnable_fn = NULL;
-mir_sdr_SetTransferMode_t					mir_sdr_SetTransferMode_fn = NULL;
-mir_sdr_GetDevices_t						mir_sdr_GetDevices_fn = NULL;
-mir_sdr_SetDeviceIdx_t						mir_sdr_SetDeviceIdx_fn = NULL;
-mir_sdr_GetHwVersion_t						mir_sdr_GetHwVersion_fn = NULL;
-mir_sdr_ReleaseDeviceIdx_t					mir_sdr_ReleaseDeviceIdx_fn = NULL;
-mir_sdr_GainChangeCallbackMessageReceived_t	mir_sdr_GainChangeCallbackMessageReceived_fn = NULL;
+sdrplay_api_Init_t								sdrplay_api_Init_fn = NULL;
+sdrplay_api_Uninit_t							sdrplay_api_Uninit_fn = NULL;
+sdrplay_api_Open_t								sdrplay_api_Open_fn = NULL;
+sdrplay_api_Close_t								sdrplay_api_Close_fn = NULL;
+sdrplay_api_ApiVersion_t						sdrplay_api_ApiVersion_fn = NULL;
+sdrplay_api_LockDeviceApi_t						sdrplay_api_LockDeviceApi_fn = NULL;
+sdrplay_api_UnlockDeviceApi_t					sdrplay_api_UnlockDeviceApi_fn = NULL;
+sdrplay_api_GetDevices_t						sdrplay_api_GetDevices_fn = NULL;
+sdrplay_api_SelectDevice_t						sdrplay_api_SelectDevice_fn = NULL;
+sdrplay_api_ReleaseDevice_t						sdrplay_api_ReleaseDevice_fn = NULL;
+sdrplay_api_GetErrorString_t					sdrplay_api_GetErrorString_fn = NULL;
+sdrplay_api_DebugEnable_t						sdrplay_api_DebugEnable_fn = NULL;
+sdrplay_api_GetDeviceParams_t					sdrplay_api_GetDeviceParams_fn = NULL;
+sdrplay_api_Update_t							sdrplay_api_Update_fn = NULL;
+sdrplay_api_SwapRspDuoActiveTuner_t				sdrplay_api_SwapRspDuoActiveTuner_fn = NULL;
+sdrplay_api_SwapRspDuoDualTunerModeSampleRate_t	sdrplay_api_SwapRspDuoDualTunerModeSampleRate_fn = NULL;
 
 static int buffer_sizes[] = //in kBytes
 { 
-	1,		2,		4,		8,
-  16,   32,   64,  128,
- 256,	 512,	1024
+	1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024
 };
 
 static int buffer_default=6;// 64kBytes
@@ -1140,18 +1126,20 @@ HANDLE worker_handle=INVALID_HANDLE_VALUE;
 int FindSampleRateIdx(double);
 void SaveSettings(void);
 void LoadSettings(void);
-void ProgramFreq(double freq, int abs);
-void ProgramGr(int *gr, int *sysgr, int lnaen, int abs);
 void ReinitAll(void);
+void UpdateSR(void);
 
 /* ExtIO Callback */
 void (* WinradCallBack)(int, int, float, void *) = NULL;
-#define WINRAD_SRCHANGE     100
-#define WINRAD_LOCHANGE     101
-#define WINRAD_LOBLOCKED    102
-#define WINRAD_LORELEASED   103
-#define WINRAD_TUNECHANGED  105
-#define WINRAD_DEMODCHANGED 106
+#define WINRAD_SRCHANGE			100
+#define WINRAD_LOCHANGE			101
+#define WINRAD_LOBLOCKED		102
+#define WINRAD_LORELEASED		103
+#define WINRAD_TUNECHANGED		105
+#define WINRAD_DEMODCHANGED		106
+#define WINRAD_START			107
+#define WINRAD_STOP				108
+#define WINRAD_CHANGED_FILTER	109
 
 int NUM_OF_HOTKEYS = 0;
 
@@ -1171,6 +1159,13 @@ static INT_PTR CALLBACK HelpDlgProc(HWND, UINT, WPARAM, LPARAM);
 HWND h_HelpDialog = NULL;
 
 static INT_PTR CALLBACK StationConfigDlgProc(HWND, UINT, WPARAM, LPARAM);
+
+void Reset_IFBW();
+void Reset_SAMPLERATE(HWND hwndDlg);
+void Reset_DECIMATION(HWND hwndDlg);
+void ApplyDecimation(int decValue);
+void Update_IFBW(void);
+
 HWND h_StationConfigDialog = NULL;
 
 HWND h_SplashScreen = NULL;
@@ -1233,25 +1228,6 @@ std::wstring GetKeyPathFromKKEY(HKEY key)
 		}
 	}
 	return keyPath;
-}
-
-const char * getMirErrText(mir_sdr_ErrT err)
-{
-	switch (err)
-	{
-	case mir_sdr_Success:				return 0;
-	case mir_sdr_Fail:					return "Fail";
-	case mir_sdr_InvalidParam:			return "Invalid Parameters";
-	case mir_sdr_OutOfRange:			return "Out of Range";
-	case mir_sdr_GainUpdateError:		return "Gain Update Error";
-	case mir_sdr_RfUpdateError:			return "Rf Update Error";
-	case mir_sdr_FsUpdateError:			return "Fs Update Error";
-	case mir_sdr_HwError:				return "Hw Error";
-	case mir_sdr_AliasingError:			return "Aliasing Error";
-	case mir_sdr_AlreadyInitialised:	return "Already Initialized";
-	case mir_sdr_NotInitialised:		return "Not Initialized";
-	default:							return "Unknown";
-	}
 }
 
 void string_realloc_and_copy(char **dest, const char *src)
@@ -1653,315 +1629,417 @@ void closePopUpWindow(void)
 }
 
 extern "C"
+void LIBSDRplay_API  __stdcall HideGUI()
+{
+#ifdef DEBUG_ENABLE
+	OutputDebugString("HideGUI");
+#endif
+	int i;
+	for (i = 1; i <= NUM_OF_HOTKEYS; i++)
+	{
+		UnregisterHotKey(h_dialog, i);
+	}
+	ShowWindow(h_dialog, SW_HIDE);
+	definedHotkeys = false;
+}
+
+extern "C"
+void LIBSDRplay_API __stdcall StopHW()
+{
+#ifdef DEBUG_ENABLE
+	OutputDebugString("StopHW");
+#endif
+	Running = false;
+#ifdef DEBUG_ENABLE
+	OutputDebugString("Calling sdrplay_api_Uninit_fn");
+#endif
+	sdrplay_api_Uninit_fn(chosenDev->dev);
+}
+
+extern "C"
+void LIBSDRplay_API __stdcall CloseHW()
+{
+#ifdef DEBUG_ENABLE
+	OutputDebugString("CloseHW");
+#endif
+
+	SaveSettings();
+
+	if (h_dialog != NULL)
+		DestroyWindow(h_dialog);
+	if (h_AdvancedDialog != NULL)
+		DestroyWindow(h_AdvancedDialog);
+	if (h_ProfilesDialog != NULL)
+		DestroyWindow(h_ProfilesDialog);
+	if (h_HelpDialog != NULL)
+		DestroyWindow(h_HelpDialog);
+	if (h_StationDialog != NULL)
+		DestroyWindow(h_StationDialog);
+	if (h_StationConfigDialog != NULL)
+		DestroyWindow(h_StationConfigDialog);
+
+	if (Running)
+	{
+#ifdef DEBUG_ENABLE
+		OutputDebugString("Calling sdrplay_api_Uninit_fn");
+#endif
+		sdrplay_api_Uninit_fn(chosenDev->dev);
+		Running = false;
+	}
+#ifdef DEBUG_ENABLE
+	OutputDebugString("Calling sdrplay_api_ReleaseDevice_fn");
+#endif
+	sdrplay_api_ReleaseDevice_fn(chosenDev);
+#ifdef DEBUG_ENABLE
+	OutputDebugString("Calling sdrplay_api_Close_fn");
+#endif
+	sdrplay_api_Close_fn();
+}
+
+extern "C"
 bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 {
 #ifdef DEBUG_ENABLE
 	OutputDebugString("InitHW");
 #endif
-		char APIkeyValue[8192];
-		char tmpStringA[8192];
-		char str[1024 + 8192];
-		DWORD APIkeyValue_length = 8192;
-		char APIver[32];
-		DWORD APIver_length = 32;
-		HKEY APIkey;
-		HKEY Settingskey;
-		mir_sdr_ErrT err;
-		int error, tempRB, tempRB2;
-		DWORD IntSz = sizeof(int);
-		WCHAR csvPath[8192];
+	char APIkeyValue[4096];
+	char tmpStringA[4096];
+	char str[1024 + 4096];
+	DWORD APIkeyValue_length = 4096;
+	char APIver[32];
+	DWORD APIver_length = 32;
+	HKEY APIkey;
+	HKEY Settingskey;
+	sdrplay_api_ErrT err;
+	int error, tempRB, tempRB2;
+	DWORD IntSz = sizeof(int);
+	WCHAR csvPath[4096];
 
-		gains = new int[n_gains];
-		for (int i = 0; i < 60; i++)
-		{
-			gains[i] = i + 19;
-		}
+	for (int i = GAIN_SLIDER_MIN; i <= GAIN_SLIDER_MAX; i++)
+	{
+		gains[i - GAIN_SLIDER_MIN] = i;
+	}
 		
-		if (RegOpenKey(HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\SDRplay\\API"), &APIkey) != ERROR_SUCCESS)
+	if (RegOpenKey(HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\SDRplay\\Service\\API"), &APIkey) != ERROR_SUCCESS)
+	{
+		error = GetLastError();
+		_stprintf_s(str, TEXT("Failed to locate API registry entry\nHKEY_LOCAL_MACHINE\\SOFTWARE\\SDRplay\\Service\\API\nERROR %d\n"), error);
+		MessageBox(NULL, str ,TEXT("SDRplay ExtIO DLL"),MB_ICONERROR | MB_OK);
+		return false;
+	}
+	else
+	{
+		RegQueryValueEx(APIkey, "Install_Dir", NULL, NULL, (LPBYTE)&APIkeyValue, &APIkeyValue_length);
+		RegQueryValueEx(APIkey, "Version", NULL, NULL, (LPBYTE)&APIver, &APIver_length);
+		sprintf_s(apiVersion, sizeof(apiVersion), APIver);
+		wcscpy_s(regPath, GetKeyPathFromKKEY(APIkey).c_str());
+		RegCloseKey(APIkey);
+	}
+
+	#ifndef _WIN64
+		sprintf_s(tmpStringA, 8192, "%s\\x86\\sdrplay_api.dll", APIkeyValue);
+	#else
+		sprintf_s(tmpStringA, 8192, "%s\\x64\\sdrplay_api.dll", APIkeyValue);
+	#endif
+
+	sprintf_s(apiPath, sizeof(apiPath), "%s", tmpStringA);
+
+	LPCSTR ApiDllName = (LPCSTR)tmpStringA;
+
+	if (ApiDll == NULL)
+	{		
+		ApiDll = LoadLibrary(ApiDllName);
+	}
+	if (ApiDll == NULL)
+	{
+		ApiDll = LoadLibrary("sdrplay_api.dll");
+	}
+	if (ApiDll == NULL)
+	{
+		error = GetLastError();
+		_stprintf_s(str, TEXT("Failed to load API DLL\n%s\nERROR %d\n"), ApiDllName, error);
+		MessageBox(NULL, str, TEXT("SDRplay ExtIO DLL"), MB_ICONERROR | MB_OK);
+		return false;
+	}
+
+	sdrplay_api_Init_fn = (sdrplay_api_Init_t)GetProcAddress(ApiDll, "sdrplay_api_Init");
+	sdrplay_api_Uninit_fn = (sdrplay_api_Uninit_t)GetProcAddress(ApiDll, "sdrplay_api_Uninit");
+	sdrplay_api_Open_fn = (sdrplay_api_Open_t)GetProcAddress(ApiDll, "sdrplay_api_Open");
+	sdrplay_api_Close_fn = (sdrplay_api_Close_t)GetProcAddress(ApiDll, "sdrplay_api_Close");
+	sdrplay_api_ApiVersion_fn = (sdrplay_api_ApiVersion_t)GetProcAddress(ApiDll, "sdrplay_api_ApiVersion");
+	sdrplay_api_LockDeviceApi_fn = (sdrplay_api_LockDeviceApi_t)GetProcAddress(ApiDll, "sdrplay_api_LockDeviceApi");
+	sdrplay_api_UnlockDeviceApi_fn = (sdrplay_api_UnlockDeviceApi_t)GetProcAddress(ApiDll, "sdrplay_api_UnlockDeviceApi");
+	sdrplay_api_GetDevices_fn = (sdrplay_api_GetDevices_t)GetProcAddress(ApiDll, "sdrplay_api_GetDevices");
+	sdrplay_api_SelectDevice_fn = (sdrplay_api_SelectDevice_t)GetProcAddress(ApiDll, "sdrplay_api_SelectDevice");
+	sdrplay_api_ReleaseDevice_fn = (sdrplay_api_ReleaseDevice_t)GetProcAddress(ApiDll, "sdrplay_api_ReleaseDevice");
+	sdrplay_api_GetErrorString_fn = (sdrplay_api_GetErrorString_t)GetProcAddress(ApiDll, "sdrplay_api_GetErrorString");
+	sdrplay_api_DebugEnable_fn = (sdrplay_api_DebugEnable_t)GetProcAddress(ApiDll, "sdrplay_api_DebugEnable");
+	sdrplay_api_GetDeviceParams_fn = (sdrplay_api_GetDeviceParams_t)GetProcAddress(ApiDll, "sdrplay_api_GetDeviceParams");
+	sdrplay_api_Update_fn = (sdrplay_api_Update_t)GetProcAddress(ApiDll, "sdrplay_api_Update");
+	sdrplay_api_SwapRspDuoActiveTuner_fn = (sdrplay_api_SwapRspDuoActiveTuner_t)GetProcAddress(ApiDll, "sdrplay_api_SwapRspDuoActiveTuner");
+	sdrplay_api_SwapRspDuoDualTunerModeSampleRate_fn = (sdrplay_api_SwapRspDuoDualTunerModeSampleRate_t)GetProcAddress(ApiDll, "sdrplay_api_SwapRspDuoDualTunerModeSampleRate");
+
+	if ((sdrplay_api_Init_fn == NULL) ||
+		(sdrplay_api_Uninit_fn == NULL) ||
+		(sdrplay_api_Open_fn == NULL) ||
+		(sdrplay_api_Close_fn == NULL) ||
+		(sdrplay_api_ApiVersion_fn == NULL) ||
+		(sdrplay_api_LockDeviceApi_fn == NULL) ||
+		(sdrplay_api_UnlockDeviceApi_fn == NULL) ||
+		(sdrplay_api_GetDevices_fn == NULL) ||
+		(sdrplay_api_SelectDevice_fn == NULL) ||
+		(sdrplay_api_ReleaseDevice_fn == NULL) ||
+		(sdrplay_api_GetErrorString_fn == NULL) ||
+		(sdrplay_api_DebugEnable_fn == NULL) ||
+		(sdrplay_api_GetDeviceParams_fn == NULL) ||
+		(sdrplay_api_Update_fn == NULL) ||
+		(sdrplay_api_SwapRspDuoActiveTuner_fn == NULL) ||
+		(sdrplay_api_SwapRspDuoDualTunerModeSampleRate_fn == NULL)
+		)
+	{
+		MessageBox(NULL, TEXT("Failed to map API DLL functions\n"), TEXT("SDRplay ExtIO DLL"), MB_ICONERROR | MB_OK);
+		FreeLibrary(ApiDll);
+		return false;
+	}
+
+#ifdef DEBUG_ENABLE
+	OutputDebugString("Open API");
+#endif
+	err = sdrplay_api_Open_fn();
+	if (err != sdrplay_api_Success)
+	{
+		OutputDebugString("Cannot connect to API Service");
+		MessageBox(NULL, TEXT("Unable to connect to API Service, restart service and try again"), TEXT("SDRplay ExtIO Error"), MB_ICONERROR | MB_OK);
+		return false;
+	}
+
+	err = sdrplay_api_LockDeviceApi_fn();
+	if (err != sdrplay_api_Success)
+	{
+		OutputDebugString("Cannot Lock the API");
+		MessageBox(NULL, TEXT("Unable to lock the API"), TEXT("SDRplay ExtIO Error"), MB_ICONERROR | MB_OK);
+#ifdef DEBUG_ENABLE
+		OutputDebugString("Close API");
+#endif
+		sdrplay_api_Close_fn();
+		return false;
+	}
+
+#ifdef DEBUG_ENABLE
+	OutputDebugString("Get Device Information...");
+	sdrplay_api_DebugEnable_fn(NULL, (sdrplay_api_DbgLvl_t)RSP_DEBUG);
+#endif
+	bool foundRSP1 = false;
+	sdrplay_api_GetDevices_fn(devices, &numDevs, MAXNUMOFDEVS);
+	if (devices != NULL)
+	{
+		unsigned int i;
+		for (i = 0; i < numDevs; i++)
 		{
-			error = GetLastError();
-			_stprintf_s(str, TEXT("Failed to locate API registry entry\nHKEY_LOCAL_MACHINE\\SOFTWARE\\SDRplay\\API\nERROR %d\n"), error);
-			MessageBox(NULL, str ,TEXT("SDRplay ExtIO DLL"),MB_ICONERROR | MB_OK);
+			_snprintf_s(msgbuf, 1024, "[%d/%d] SerNo=%s hwVer=%d", (i + 1), numDevs, devices[i].SerNo, devices[i].hwVer);
+			OutputDebugString(msgbuf);
+			if (devices[i].hwVer == SDRPLAY_RSP1_ID)
+			{
+				chosenDevice = i;
+				chosenDev = &devices[chosenDevice];
+
+				err = sdrplay_api_SelectDevice_fn(chosenDev);
+				if (err != sdrplay_api_Success)
+				{
+					OutputDebugString("SelectDevice error");
+					MessageBox(NULL, TEXT("Cannot open the device"), TEXT("SDRplay ExtIO Error"), MB_ICONERROR | MB_OK);
+#ifdef DEBUG_ENABLE
+					OutputDebugString("UnlockDeviceApi");
+#endif
+					sdrplay_api_UnlockDeviceApi_fn();
+#ifdef DEBUG_ENABLE
+					OutputDebugString("Close API");
+#endif
+					sdrplay_api_Close_fn();
+					return false;
+				}
+				foundRSP1 = true;
+#ifdef DEBUG_ENABLE
+				OutputDebugString("UnlockDeviceApi");
+#endif
+				sdrplay_api_UnlockDeviceApi_fn();
+				break;
+			}
+		}
+		if (!foundRSP1) {
+			OutputDebugString("No RSP1s found.");
+			MessageBox(NULL, TEXT("Failed to find any available RSP1s"), TEXT("SDRplay ExtIO Error"), MB_ICONERROR | MB_OK);
+#ifdef DEBUG_ENABLE
+			OutputDebugString("UnlockDeviceApi");
+#endif
+			sdrplay_api_UnlockDeviceApi_fn();
+#ifdef DEBUG_ENABLE
+			OutputDebugString("Close API");
+#endif
+			sdrplay_api_Close_fn();
 			return false;
 		}
-		else
-		{
-			RegQueryValueEx(APIkey, "Install_Dir", NULL, NULL, (LPBYTE)&APIkeyValue, &APIkeyValue_length);
-			RegQueryValueEx(APIkey, "Version", NULL, NULL, (LPBYTE)&APIver, &APIver_length);
-			sprintf_s(apiVersion, sizeof(apiVersion), APIver);
-			wcscpy_s(regPath, GetKeyPathFromKKEY(APIkey).c_str());
-			RegCloseKey(APIkey);
-		}
+	}
+	else
+	{
+#ifdef DEBUG_ENABLE
+		OutputDebugString("No RSPs found.");
+		MessageBox(NULL, TEXT("Failed to find any RSPs"), TEXT("SDRplay ExtIO Error"), MB_ICONERROR | MB_OK);
+#ifdef DEBUG_ENABLE
+		OutputDebugString("UnlockDeviceApi");
+#endif
+		sdrplay_api_UnlockDeviceApi_fn();
+#ifdef DEBUG_ENABLE
+		OutputDebugString("Close API");
+#endif
+		sdrplay_api_Close_fn();
+		return false;
+#endif
+	}
 
-		#ifndef _WIN64
-			sprintf_s(tmpStringA, 8192, "%s\\x86\\mir_sdr_api.dll", APIkeyValue);
-		#else
-			sprintf_s(tmpStringA, 8192, "%s\\x64\\mir_sdr_api.dll", APIkeyValue);
-		#endif
+	// We have a device at this point
+#ifdef DEBUG_ENABLE
+	sdrplay_api_DebugEnable_fn(devices[chosenDevice].dev, (sdrplay_api_DbgLvl_t)RSP_DEBUG);
+#endif
 
-		sprintf_s(apiPath, sizeof(apiPath), "%s", tmpStringA);
+	err = sdrplay_api_GetDeviceParams_fn(chosenDev->dev, &deviceParams);
+	if (err != sdrplay_api_Success)
+	{
+		sprintf_s(tmpStringA, "GetDeviceParams error (%s)", sdrplay_api_GetErrorString_fn(err));
+		OutputDebugString(tmpStringA);
+#ifdef DEBUG_ENABLE
+		OutputDebugString("UnlockDeviceApi");
+#endif
+		sdrplay_api_UnlockDeviceApi_fn();
+#ifdef DEBUG_ENABLE
+		OutputDebugString("Close API");
+#endif
+		sdrplay_api_Close_fn();
+		return false;
+	}
 
-		LPCSTR ApiDllName = (LPCSTR)tmpStringA;
-
-		if (ApiDll == NULL)
-		{		
-			ApiDll = LoadLibrary(ApiDllName);
-		}
-		if (ApiDll == NULL)
-		{
-			ApiDll = LoadLibrary("mir_sdr_api.dll");
-		}
-		if (ApiDll == NULL)
-		{
-			error = GetLastError();
-			_stprintf_s(str, TEXT("Failed to load API DLL\n%s\nERROR %d\n"), ApiDllName, error);
-			MessageBox(NULL, str, TEXT("SDRplay ExtIO DLL"), MB_ICONERROR | MB_OK);
-			return false;
-		}
-
-		mir_sdr_Init_fn = (mir_sdr_Init_t)GetProcAddress(ApiDll, "mir_sdr_Init");
-		mir_sdr_Uninit_fn = (mir_sdr_Uninit_t)GetProcAddress(ApiDll, "mir_sdr_Uninit");
-		mir_sdr_ReadPacket_fn = (mir_sdr_ReadPacket_t)GetProcAddress(ApiDll, "mir_sdr_ReadPacket");
-		mir_sdr_SetRf_fn = (mir_sdr_SetRf_t)GetProcAddress(ApiDll, "mir_sdr_SetRf");
-		mir_sdr_SetFs_fn = (mir_sdr_SetFs_t)GetProcAddress(ApiDll, "mir_sdr_SetFs");
-		mir_sdr_SetGr_fn = (mir_sdr_SetGr_t)GetProcAddress(ApiDll, "mir_sdr_SetGr");
-		mir_sdr_SetGrParams_fn = (mir_sdr_SetGrParams_t)GetProcAddress(ApiDll, "mir_sdr_SetGrParams");
-		mir_sdr_SetDcMode_fn = (mir_sdr_SetDcMode_t)GetProcAddress(ApiDll, "mir_sdr_SetDcMode");
-		mir_sdr_SetDcTrackTime_fn = (mir_sdr_SetDcTrackTime_t)GetProcAddress(ApiDll, "mir_sdr_SetDcTrackTime");
-		mir_sdr_SetSyncUpdateSampleNum_fn = (mir_sdr_SetSyncUpdateSampleNum_t)GetProcAddress(ApiDll, "mir_sdr_SetSyncUpdateSampleNum");
-		mir_sdr_SetSyncUpdatePeriod_fn = (mir_sdr_SetSyncUpdatePeriod_t)GetProcAddress(ApiDll, "mir_sdr_SetSyncUpdatePeriod");
-		mir_sdr_ApiVersion_fn = (mir_sdr_ApiVersion_t)GetProcAddress(ApiDll, "mir_sdr_ApiVersion");
-		mir_sdr_ResetUpdateFlags_fn = (mir_sdr_ResetUpdateFlags_t)GetProcAddress(ApiDll, "mir_sdr_ResetUpdateFlags");
-		mir_sdr_DownConvert_fn = (mir_sdr_DownConvert_t)GetProcAddress(ApiDll, "mir_sdr_DownConvert");
-		mir_sdr_SetParam_fn = (mir_sdr_SetParam_t)GetProcAddress(ApiDll, "mir_sdr_SetParam");
-		mir_sdr_SetPpm_fn = (mir_sdr_SetPpm_t)GetProcAddress(ApiDll, "mir_sdr_SetPpm");
-		mir_sdr_SetLoMode_fn = (mir_sdr_SetLoMode_t)GetProcAddress(ApiDll, "mir_sdr_SetLoMode");
-		mir_sdr_SetGrAltMode_fn = (mir_sdr_SetGrAltMode_t)GetProcAddress(ApiDll, "mir_sdr_SetGrAltMode");
-		mir_sdr_DCoffsetIQimbalanceControl_fn = (mir_sdr_DCoffsetIQimbalanceControl_t)GetProcAddress(ApiDll, "mir_sdr_DCoffsetIQimbalanceControl");
-		mir_sdr_DecimateControl_fn = (mir_sdr_DecimateControl_t)GetProcAddress(ApiDll, "mir_sdr_DecimateControl");
-		mir_sdr_AgcControl_fn = (mir_sdr_AgcControl_t)GetProcAddress(ApiDll, "mir_sdr_AgcControl");
-		mir_sdr_StreamInit_fn = (mir_sdr_StreamInit_t)GetProcAddress(ApiDll, "mir_sdr_StreamInit");
-		mir_sdr_StreamUninit_fn = (mir_sdr_StreamUninit_t)GetProcAddress(ApiDll, "mir_sdr_StreamUninit");
-		mir_sdr_Reinit_fn = (mir_sdr_Reinit_t)GetProcAddress(ApiDll, "mir_sdr_Reinit");
-		mir_sdr_GetGrByFreq_fn = (mir_sdr_GetGrByFreq_t)GetProcAddress(ApiDll, "mir_sdr_GetGrByFreq");
-		mir_sdr_DebugEnable_fn = (mir_sdr_DebugEnable_t)GetProcAddress(ApiDll, "mir_sdr_DebugEnable");
-		mir_sdr_SetTransferMode_fn = (mir_sdr_SetTransferMode_t)GetProcAddress(ApiDll, "mir_sdr_SetTransferMode");
-		mir_sdr_GetDevices_fn = (mir_sdr_GetDevices_t)GetProcAddress(ApiDll, "mir_sdr_GetDevices");
-		mir_sdr_SetDeviceIdx_fn = (mir_sdr_SetDeviceIdx_t)GetProcAddress(ApiDll, "mir_sdr_SetDeviceIdx");
-		mir_sdr_GetHwVersion_fn = (mir_sdr_GetHwVersion_t)GetProcAddress(ApiDll, "mir_sdr_GetHwVersion");
-		mir_sdr_ReleaseDeviceIdx_fn = (mir_sdr_ReleaseDeviceIdx_t)GetProcAddress(ApiDll, "mir_sdr_ReleaseDeviceIdx");
-		mir_sdr_GainChangeCallbackMessageReceived_fn = (mir_sdr_GainChangeCallbackMessageReceived_t)GetProcAddress(ApiDll, "mir_sdr_GainChangeCallbackMessageReceived");
+	chParams = (chosenDev->tuner == sdrplay_api_Tuner_A) ? deviceParams->rxChannelA : deviceParams->rxChannelB;
 		
-		if	(   (mir_sdr_Init_fn == NULL)
-			 || (mir_sdr_Uninit_fn == NULL)
-			 || (mir_sdr_ReadPacket_fn == NULL)
-			 || (mir_sdr_SetRf_fn == NULL)
-			 || (mir_sdr_SetFs_fn == NULL)
-			 || (mir_sdr_SetGr_fn == NULL)
-			 || (mir_sdr_SetGrParams_fn == NULL)
-			 || (mir_sdr_SetDcMode_fn == NULL)
-			 || (mir_sdr_SetDcTrackTime_fn == NULL)
-			 || (mir_sdr_SetSyncUpdateSampleNum_fn == NULL)
-			 || (mir_sdr_SetSyncUpdatePeriod_fn == NULL)
-			 || (mir_sdr_ApiVersion_fn == NULL)
-			 || (mir_sdr_ResetUpdateFlags_fn == NULL)
-			 || (mir_sdr_DownConvert_fn == NULL)
-			 || (mir_sdr_SetParam_fn == NULL)
-			 || (mir_sdr_SetPpm_fn == NULL)
-			 || (mir_sdr_SetLoMode_fn == NULL)
-			 || (mir_sdr_SetGrAltMode_fn == NULL)
-			 || (mir_sdr_DCoffsetIQimbalanceControl_fn == NULL)
-			 || (mir_sdr_DecimateControl_fn == NULL)
-			 || (mir_sdr_AgcControl_fn == NULL)
-			 || (mir_sdr_StreamInit_fn == NULL)
-			 || (mir_sdr_StreamUninit_fn == NULL)
-			 || (mir_sdr_Reinit_fn == NULL)
-			 || (mir_sdr_DebugEnable_fn == NULL)
-			 || (mir_sdr_SetTransferMode_fn == NULL)
-			 || (mir_sdr_GetGrByFreq_fn == NULL)
-			 || (mir_sdr_GetDevices_fn == NULL)
-			 || (mir_sdr_SetDeviceIdx_fn == NULL)
-			 || (mir_sdr_GetHwVersion_fn == NULL)
-			 || (mir_sdr_ReleaseDeviceIdx_fn == NULL)
-			 || (mir_sdr_GainChangeCallbackMessageReceived_fn == NULL)
-			)
+	error = RegOpenKeyEx(HKEY_CURRENT_USER, TEXT("Software\\SDRplay\\Settings"), 0, KEY_ALL_ACCESS, &Settingskey);
+	if (error == ERROR_SUCCESS)
+	{
+		error = RegQueryValueEx(Settingskey, "StationLookup", NULL, NULL, (LPBYTE)&tempRB, &IntSz);
+		if (error != ERROR_SUCCESS)
 		{
-			MessageBox(NULL, TEXT("Failed to map API DLL functions\n"), TEXT("SDRplay ExtIO DLL"), MB_ICONERROR | MB_OK);
-			FreeLibrary(ApiDll);
-			return false;
-		}
-
 #ifdef DEBUG_ENABLE
-		OutputDebugString("Get Device Information...");
-		mir_sdr_DebugEnable_fn(RSP_DEBUG);
+			OutputDebugString("Failed to recall saved StationLookup state");
 #endif
-		bool foundRSP1 = false;
-		mir_sdr_GetDevices_fn(&devices[0], &numDevs, MAXNUMOFDEVS);
-		if (devices != NULL)
-		{
-			unsigned int i;
-			for (i = 0; i < numDevs; i++)
-			{
-				_snprintf_s(msgbuf, 1024, "[%d/%d] DevNm=%s SerNo=%s hwVer=%d, devAvail=%d", (i + 1), numDevs, devices[i].DevNm, devices[i].SerNo, devices[i].hwVer, devices[i].devAvail);
-				OutputDebugString(msgbuf);
-				if (devices[i].hwVer == 1 && devices[i].devAvail == 1)
-				{
-					mir_sdr_SetDeviceIdx_fn(i);
-					foundRSP1 = true;
-					break;
-				}
-			}
-			if (!foundRSP1) {
-				OutputDebugString("No RSP1s found.");
-				MessageBox(NULL, TEXT("Failed to find any available RSP1s"), TEXT("SDRplay ExtIO Error"), MB_ICONERROR | MB_OK);
-				return false;
-			}
+			stationLookup = false;
 		}
+		if (tempRB == 1)
+			stationLookup = true;
 		else
+			stationLookup = false;
+
+		error = RegQueryValueEx(Settingskey, "WorkOffline", NULL, NULL, (LPBYTE)&tempRB2, &IntSz);
+		if (error != ERROR_SUCCESS)
 		{
 #ifdef DEBUG_ENABLE
-			OutputDebugString("No RSPs found.");
-			MessageBox(NULL, TEXT("Failed to find any RSPs"), TEXT("SDRplay ExtIO Error"), MB_ICONERROR | MB_OK);
-			return false;
+			OutputDebugString("Failed to recall saved WorkOffline state");
 #endif
+			workOffline = false;
 		}
+		if (tempRB2 == 1)
+			workOffline = true;
+		else
+			workOffline = false;
 
-		// The code belkow performs an init to check for the presence of the hardware.  An uninit is done afterwards.
 
-		IFMode = mir_sdr_IF_Zero;
-		Bandwidth = mir_sdr_BW_1_536;
-		lastFreqBand = -1;
-
-		err = mir_sdr_Init_fn(60, 2.0, 98.8, Bandwidth, IFMode, &SampleCount);
-		if (err == mir_sdr_Success)
+		if (stationLookup)
 		{
-			error = RegOpenKeyEx(HKEY_CURRENT_USER, TEXT("Software\\SDRplay\\Settings"), 0, KEY_ALL_ACCESS, &Settingskey);
-			if (error == ERROR_SUCCESS)
+			if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA | CSIDL_FLAG_CREATE, NULL, 0, csvPath)))
 			{
-				error = RegQueryValueEx(Settingskey, "StationLookup", NULL, NULL, (LPBYTE)&tempRB, &IntSz);
-				if (error != ERROR_SUCCESS)
+				PathAppendW(csvPath, L"\\SDRplay");
+
+				LPCWSTR csvPathW = csvPath;
+				if (!DirectoryExists(csvPathW))
+					SHCreateDirectory(0, csvPath);
+
+				PathAppendW(csvPath, L"\\sked-b17.csv");
+				//char *newString = new char[wcslen(csvPath) + 1];
+				char* newString = new char[8192];
+				size_t iSize;
+				wcstombs_s(&iSize, newString, 8192, csvPath, wcslen(csvPath));
+
+				if (FileExists(newString))
 				{
 #ifdef DEBUG_ENABLE
-					OutputDebugString("Failed to recall saved StationLookup state");
+					OutputDebugString("csv file exists");
 #endif
-					stationLookup = false;
-				}
-				if (tempRB == 1)
-					stationLookup = true;
-				else
-					stationLookup = false;
-
-				error = RegQueryValueEx(Settingskey, "WorkOffline", NULL, NULL, (LPBYTE)&tempRB2, &IntSz);
-				if (error != ERROR_SUCCESS)
-				{
-#ifdef DEBUG_ENABLE
-					OutputDebugString("Failed to recall saved WorkOffline state");
-#endif
-					workOffline = false;
-				}
-				if (tempRB2 == 1)
-					workOffline = true;
-				else
-					workOffline = false;
-
-
-				if (stationLookup)
-				{
-					if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA | CSIDL_FLAG_CREATE, NULL, 0, csvPath)))
+					localDBExists = true;
+					if (!FileModifiedToday(newString) && !workOffline)
 					{
-						PathAppendW(csvPath, L"\\SDRplay");
-
-						LPCWSTR csvPathW = csvPath;
-						if (!DirectoryExists(csvPathW))
-							SHCreateDirectory(0, csvPath);
-
-						PathAppendW(csvPath, L"\\sked-b17.csv");
-						char *newString = new char[wcslen(csvPath) + 1];
-						size_t iSize;
-						wcstombs_s(&iSize, newString, 8192, csvPath, wcslen(csvPath));
-
-						if (FileExists(newString))
+#ifdef DEBUG_ENABLE
+						OutputDebugString("old file, creating new");
+#endif
+						startupPopUpWindow();
+						if (!copyCSVtoHDD(newString))
 						{
 #ifdef DEBUG_ENABLE
-							OutputDebugString("csv file exists");
+							OutputDebugString("error during copy");
 #endif
-							localDBExists = true;
-							if (!FileModifiedToday(newString) && !workOffline)
-							{
-#ifdef DEBUG_ENABLE
-								OutputDebugString("old file, creating new");
-#endif
-								startupPopUpWindow();
-								if (!copyCSVtoHDD(newString))
-								{
-#ifdef DEBUG_ENABLE
-									OutputDebugString("error during copy");
-#endif
-									localDBExists = false;
-									if (h_StationConfigDialog != NULL)
-										Edit_SetText(GetDlgItem(h_StationConfigDialog, IDC_STATIONCONFIG_STATUS), "Database Status: Copy failed");
-								}
-								else
-								{
-									localDBExists = true;
-									if (h_StationConfigDialog != NULL)
-										Edit_SetText(GetDlgItem(h_StationConfigDialog, IDC_STATIONCONFIG_STATUS), "Database Status: Good");
-								}
-							}
+							localDBExists = false;
+							if (h_StationConfigDialog != NULL)
+								Edit_SetText(GetDlgItem(h_StationConfigDialog, IDC_STATIONCONFIG_STATUS), "Database Status: Copy failed");
 						}
 						else
 						{
-#ifdef DEBUG_ENABLE
-							OutputDebugString("no file exists");
-#endif
-							if (workOffline)
-							{
-								localDBExists = false;
-								if (h_StationConfigDialog != NULL)
-									Edit_SetText(GetDlgItem(h_StationConfigDialog, IDC_STATIONCONFIG_STATUS), "Database Status: No database");
-							}
-							else
-							{
-								startupPopUpWindow();
-								if (!copyCSVtoHDD(newString))
-								{
-#ifdef DEBUG_ENABLE
-									OutputDebugString("error during copy");
-#endif
-									localDBExists = false;
-									if (h_StationConfigDialog != NULL)
-										Edit_SetText(GetDlgItem(h_StationConfigDialog, IDC_STATIONCONFIG_STATUS), "Database Status: Copy failed");
-								}
-								else
-								{
-									localDBExists = true;
-									if (h_StationConfigDialog != NULL)
-										Edit_SetText(GetDlgItem(h_StationConfigDialog, IDC_STATIONCONFIG_STATUS), "Database Status: Good");
-								}
-							}
+							localDBExists = true;
+							if (h_StationConfigDialog != NULL)
+								Edit_SetText(GetDlgItem(h_StationConfigDialog, IDC_STATIONCONFIG_STATUS), "Database Status: Good");
 						}
 					}
+				}
+				else
+				{
+#ifdef DEBUG_ENABLE
+					OutputDebugString("no file exists");
+#endif
+					if (workOffline)
+					{
+						localDBExists = false;
+						if (h_StationConfigDialog != NULL)
+							Edit_SetText(GetDlgItem(h_StationConfigDialog, IDC_STATIONCONFIG_STATUS), "Database Status: No database");
+					}
 					else
-						MessageBox(NULL, "Error locating local temporary storage", NULL, MB_OK);
+					{
+						startupPopUpWindow();
+						if (!copyCSVtoHDD(newString))
+						{
+#ifdef DEBUG_ENABLE
+							OutputDebugString("error during copy");
+#endif
+							localDBExists = false;
+							if (h_StationConfigDialog != NULL)
+								Edit_SetText(GetDlgItem(h_StationConfigDialog, IDC_STATIONCONFIG_STATUS), "Database Status: Copy failed");
+						}
+						else
+						{
+							localDBExists = true;
+							if (h_StationConfigDialog != NULL)
+								Edit_SetText(GetDlgItem(h_StationConfigDialog, IDC_STATIONCONFIG_STATUS), "Database Status: Good");
+						}
+					}
 				}
 			}
+			else
+				MessageBox(NULL, "Error locating local temporary storage", NULL, MB_OK);
+		}
+	}
 
 #ifdef DEBUG_ENABLE
-			OutputDebugString("Hardware sucessfully initalised & Registry paths found");
+	OutputDebugString("Hardware sucessfully initalised & Registry paths found");
 #endif
-			sprintf_s(name, 32, "%s", "SDRplay RSP");
-			sprintf_s(model, 32, "%s", "Radio Spectrum Processor");
-			type = 3;	
-			mir_sdr_Uninit_fn();
-			closePopUpWindow();
-			return true;
-		}
-		else
-		{
-			closePopUpWindow();
-			MessageBox(NULL, TEXT("Warning SDRplay Hardware not found"), TEXT("SDRplay ExtIO DLL"), MB_ICONERROR | MB_OK);
-			return false;
-		}
+	sprintf_s(name, 32, "%s", "SDRplay RSP");
+	sprintf_s(model, 32, "%s", "Radio Spectrum Processor");
+	type = 3;
+	closePopUpWindow();
+	return true;
 }
 
 extern "C"
@@ -1979,13 +2057,11 @@ bool  LIBSDRplay_API __stdcall OpenHW()
 extern "C"
 long LIBSDRplay_API __stdcall SetHWLO(unsigned long freq)
 {
-	TCHAR str[255];
-	int FreqBand = 0;
+	sdrplay_api_ErrT err;
 
 	#ifdef DEBUG_ENABLE
 	OutputDebugString("SetHWLO");
 	#endif
-	FreqBand = 0;
 
 	#ifdef DEBUG_ENABLE
 	_snprintf_s(msgbuf, 1024, "%s %lu", "Frequency is", freq);
@@ -2007,241 +2083,299 @@ long LIBSDRplay_API __stdcall SetHWLO(unsigned long freq)
 		return -100000;
 	}
 
+	TCHAR LNAGainReductionTxt[255];
+
+	if (LNAGainReduction > LNA_GAIN_SLIDER_MAX)
+	{
+		LNAGainReduction = LNA_GAIN_SLIDER_MAX;
+		sprintf_s(LNAGainReductionTxt, 254, "%d", LNAGainReduction);
+		SendMessage(GetDlgItem(h_dialog, IDC_LNASLIDER), TBM_SETPOS, (WPARAM)true, (LPARAM)LNAGainReduction);
+		Edit_SetText(GetDlgItem(h_dialog, IDC_LNAGRNO), LNAGainReductionTxt);
+	}
+
+	SendMessage(GetDlgItem(h_dialog, IDC_LNASLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)LNA_GAIN_SLIDER_MAX);
+
 	//Code to limit Dialog Box Movement
 	Frequency = (double)freq / 1000000;
 
-	if (!Running)
+	chParams->tunerParams.rfFreq.rfHz = freq;
+	if (Running)
 	{
-      mir_sdr_GetGrByFreq_fn(Frequency, (mir_sdr_BandT *)&FreqBand, (int *)&GainReduction, LNAEnable, &SystemGainReduction, mir_sdr_USE_SET_GR_ALT_MODE);
-   }
-	else //if (Running)
-	{
-      mir_sdr_Reinit_fn((int *)&GainReduction, 0.0, Frequency, mir_sdr_BW_Undefined, mir_sdr_IF_Undefined, mir_sdr_LO_Undefined, (int)LNAEnable, &SystemGainReduction, mir_sdr_USE_SET_GR_ALT_MODE, pZERO,
-                        (mir_sdr_ReasonForReinitT)(mir_sdr_CHANGE_GR | mir_sdr_CHANGE_RF_FREQ));
+		err = sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_Frf, sdrplay_api_Update_Ext1_None);
+		if (err != sdrplay_api_Success)
+		{
+			OutputDebugString("Frequency program error");
+		}
 	}
 
-   if (!LNAEnable)
-   {
-      //SendMessage(GetDlgItem(ghwndDlg, IDC_GR_S), UDM_SETRANGE, (WPARAM)true, (LPARAM)MAKELONG(band_MinGR[FreqBand], 78));
-      SendMessage(GetDlgItem(ghwndDlg, IDC_GAINSLIDER), TBM_SETRANGEMIN, (WPARAM)true, (LPARAM)band_MinGR[FreqBand]);
-      SendMessage(GetDlgItem(ghwndDlg, IDC_GAINSLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)78);
-      sprintf_s(str, sizeof(str), "%s %d %s", "LNA GR", band_LNAgain[FreqBand], "dB");
-      Edit_SetText(GetDlgItem(h_dialog, IDC_LNAGR), str);
-      Edit_SetText(GetDlgItem(h_dialog, IDC_LNASTATE), "LNA OFF");
-      sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
-      Edit_SetText(GetDlgItem(h_dialog, IDC_TOTALGR), str);
-   }
-   else
-   {
-      //SendMessage(GetDlgItem(ghwndDlg, IDC_GR_S), UDM_SETRANGE, (WPARAM)true, (LPARAM)MAKELONG(19, 78));
-      SendMessage(GetDlgItem(ghwndDlg, IDC_GAINSLIDER), TBM_SETRANGEMIN, (WPARAM)true, (LPARAM)19);
-      SendMessage(GetDlgItem(ghwndDlg, IDC_GAINSLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)78);
-   }
-
-   WinradCallBack(-1, WINRAD_LORELEASED, 0, NULL);
+	WinradCallBack(-1, WINRAD_LORELEASED, 0, NULL);
 	return 0;
 }
 
-mir_sdr_LoModeT GetLoMode(void)
+sdrplay_api_LoModeT GetLoMode(void)
 {
+#ifdef DEBUG_ENABLE
+	OutputDebugString("GetLoMode");
+#endif
    if (LOplanAuto)
    {
-      return mir_sdr_LO_Auto;
+      return sdrplay_api_LO_Auto;
 }
    else
    {
       switch (LOplan)
       {
-      case LO120MHz: return mir_sdr_LO_120MHz;
-      case LO144MHz: return mir_sdr_LO_144MHz;
-      case LO168MHz: return mir_sdr_LO_168MHz;
-      default:       return mir_sdr_LO_120MHz;
+      case LO120MHz: return sdrplay_api_LO_120MHz;
+      case LO144MHz: return sdrplay_api_LO_144MHz;
+      case LO168MHz: return sdrplay_api_LO_168MHz;
+      default:       return sdrplay_api_LO_120MHz;
       }
    }
 }
 
-void ProgramFreq(double freq, int abs)
+void eventCallback(sdrplay_api_EventT eventId, sdrplay_api_TunerSelectT tunerS, sdrplay_api_EventParamsT* params, void* cBContext)
 {
-   int i;
-   for (i = 0; i < 4; i++)
-   {
-      if (mir_sdr_SetRf_fn(freq, abs, 0) != mir_sdr_RfUpdateError)
-      {
-         break;
-      }
-      else
-      {
-         Sleep(25);
-      }
-   }
-   if (i == 4)
-   {
-      mir_sdr_ResetUpdateFlags_fn(0, 1, 0);
-      mir_sdr_SetRf_fn(freq, abs, 0);
-   }
-}
-
-void ProgramGr(int *gr, int *sysgr, int lnaen, int abs)
-{
-   int i;
-   for (i = 0; i < 4; i++)
-   {
-      if (mir_sdr_SetGrAltMode_fn(gr, lnaen, sysgr, abs, 0) != mir_sdr_GainUpdateError)
-      {
-         break;
-      }
-      else
-      {
-         Sleep(25);
-      }
-   }
-   if (i == 4)
-   {
-      mir_sdr_ResetUpdateFlags_fn(1, 0, 0);
-      mir_sdr_SetGrAltMode_fn(gr, lnaen, sysgr, abs, 0);
-   }
-}
-
-void ReinitAll(void)
-{
-   mir_sdr_Reinit_fn((int *)&GainReduction, samplerates[SampleRateIdx].value, Frequency, Bandwidth, IFMode, LOMode, (int)LNAEnable, &SystemGainReduction, mir_sdr_USE_SET_GR_ALT_MODE, &SampleCount,
-      (mir_sdr_ReasonForReinitT)(mir_sdr_CHANGE_GR | mir_sdr_CHANGE_FS_FREQ | mir_sdr_CHANGE_RF_FREQ | mir_sdr_CHANGE_BW_TYPE | mir_sdr_CHANGE_IF_TYPE | mir_sdr_CHANGE_LO_MODE));
-   return;
-}
-
-void gaincallbackMirSdr(unsigned int gRdB, unsigned int lnaGRdB, void *)
-{
+	(void*)tunerS;
+	(void*)cBContext;
 	char str[512];
 
 #ifdef RSP_DEBUG
-	sprintf_s(str, sizeof(str), "gRdB: %d, lnaGrdB: %d", gRdB, lnaGRdB);
+	sprintf_s(str, sizeof(str), "gRdB: %d, lnaGrdB: %d", params->gainParams.gRdB, params->gainParams.lnaGRdB);
 	OutputDebugString(str);
 #endif
 
-	if (gRdB < mir_sdr_GAIN_MESSAGE_START_ID)
+	switch (eventId)
 	{
-		GainReduction = gRdB;
-		if (AGCEnabled != mir_sdr_AGC_DISABLE) {
+	case sdrplay_api_GainChange:
+
+		if (params->gainParams.gRdB < 200)
+		{
+			GainReduction = params->gainParams.gRdB;
 			sprintf_s(str, sizeof(str), "%d", GainReduction);
 			Edit_SetText(GetDlgItem(h_dialog, IDC_GR), str);
+			ActualLNAGR = params->gainParams.lnaGRdB;
+			SystemGainReduction = GainReduction + ActualLNAGR;
+			sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
+			Edit_SetText(GetDlgItem(h_dialog, IDC_TOTALGR), str);
 			SendMessage(GetDlgItem(h_dialog, IDC_GAINSLIDER), TBM_SETPOS, (WPARAM)true, (LPARAM)GainReduction);
 		}
-		sprintf_s(str, sizeof(str), "IF Gain Reduction %d dB", GainReduction);
-		Edit_SetText(GetDlgItem(h_dialog, IDC_IFGR), str);
+		break;
+	case sdrplay_api_PowerOverloadChange:
 
-		LnaGr = lnaGRdB;
-		if (LnaGr == 0)
-		{
-			Edit_SetText(GetDlgItem(h_dialog, IDC_LNAGR), "LNA GR 0 dB");
-			Edit_SetText(GetDlgItem(h_dialog, IDC_LNASTATE), "LNA ON");
-			//SendMessage(GetDlgItem(hwndDlg, IDC_LNAGR_SWITCH), BM_SETCHECK, BST_CHECKED, 0);
-		}
-		else
-		{
-			sprintf_s(str, sizeof(str), "%s %d %s", "LNA GR", LnaGr, "dB");
-			Edit_SetText(GetDlgItem(h_dialog, IDC_LNAGR), str);
-			Edit_SetText(GetDlgItem(h_dialog, IDC_LNASTATE), "LNA OFF");
-			//SendMessage(GetDlgItem(hwndDlg, IDC_LNAGR_SWITCH), BM_SETCHECK, BST_UNCHECKED, 0);
-		}
+		sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Ctrl_OverloadMsgAck, sdrplay_api_Update_Ext1_None);
 
-		SystemGainReduction = gRdB + lnaGRdB;
-		sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
-		Edit_SetText(GetDlgItem(h_dialog, IDC_TOTALGR), str);
-	}
-	else
-	{
-		if (gRdB == mir_sdr_ADC_OVERLOAD_DETECTED)
+		if (params->powerOverloadParams.powerOverloadChangeType == sdrplay_api_Overload_Detected)
 		{
 			OutputDebugString("*** ADC OVERLOAD DETECTED ***");
 			sprintf_s(str, sizeof(str), "ADC OVERLOAD");
 			Edit_SetText(GetDlgItem(h_dialog, IDC_OVERLOAD), str);
-			mir_sdr_GainChangeCallbackMessageReceived_fn();
 		}
 		else
 		{
 			OutputDebugString("*** ADC OVERLOAD CORRECTED ***");
 			sprintf_s(str, sizeof(str), "");
 			Edit_SetText(GetDlgItem(h_dialog, IDC_OVERLOAD), str);
-			mir_sdr_GainChangeCallbackMessageReceived_fn();
 		}
+		break;
+	case sdrplay_api_RspDuoModeChange:
+
+		if (params->rspDuoModeParams.modeChangeType == sdrplay_api_SlaveAttached)
+		{
+#ifdef DEBUG_ENABLE
+			OutputDebugString("Slave Attached");
+#endif
+			slaveAttached = true;
+		}
+		else if (params->rspDuoModeParams.modeChangeType == sdrplay_api_SlaveDetached)
+		{
+#ifdef DEBUG_ENABLE
+			OutputDebugString("Slave Detatched");
+#endif
+			slaveAttached = false;
+		}
+		else if (params->rspDuoModeParams.modeChangeType == sdrplay_api_MasterInitialised)
+		{
+#ifdef DEBUG_ENABLE
+			OutputDebugString("Master Initialised");
+#endif
+		}
+		else if (params->rspDuoModeParams.modeChangeType == sdrplay_api_SlaveInitialised)
+		{
+#ifdef DEBUG_ENABLE
+			OutputDebugString("Slave Initialised");
+#endif
+		}
+		else if (params->rspDuoModeParams.modeChangeType == sdrplay_api_SlaveUninitialised)
+		{
+#ifdef DEBUG_ENABLE
+			OutputDebugString("Slave Uninitialised");
+#endif
+		}
+		else if (params->rspDuoModeParams.modeChangeType == sdrplay_api_SlaveDllDisappeared)
+		{
+#ifdef DEBUG_ENABLE
+			OutputDebugString("Slave Dll Disappeared");
+#endif
+			slaveAttached = false;
+		}
+		else if (params->rspDuoModeParams.modeChangeType == sdrplay_api_MasterDllDisappeared)
+		{
+#ifdef DEBUG_ENABLE
+			OutputDebugString("Master Dll Disappeared");
+#endif
+			WinradCallBack(-1, WINRAD_STOP, 0, NULL);
+			HideGUI();
+			StopHW();
+			CloseHW();
+			MessageBox(NULL, "The master stream no longer exists, which means that this slave stream has been stopped and the slave application will need to be closed before the stream can be restarted. This has probably occurred because the master application has either been closed or has crashed. Please always ensure that the slave application is closed before closing down or killing the master application.\n\nWarning: Trying to restart this stream could result in an error or an application crash", TEXT("Master tuner application closed"), MB_OK | MB_SYSTEMMODAL | MB_TOPMOST | MB_ICONEXCLAMATION);
+		}
+		break;
+	case sdrplay_api_DeviceRemoved:
+		if (Running)
+		{
+			Running = false;
+#ifdef DEBUG_ENABLE
+			OutputDebugString("Uninit");
+#endif
+			sdrplay_api_Uninit_fn(chosenDev->dev);
+		}
+		break;
 	}
 }
 
-void callbackMirSdr(short *xi, short *xq, unsigned int, int, int, int, unsigned int numSamps, unsigned int reset, unsigned int hwRemoved, void *)
+void sdrplayCallbackA(short* xi, short* xq, sdrplay_api_StreamCbParamsT* params, unsigned int numSamples, unsigned int reset, void* cbContext)
 {
-   (void)hwRemoved;
-   int i;
-   int j;
-   int rem;
-   int DataCount = numSamps << 1;
-   static unsigned int lastNumSamps = 0;
+	(void*)cbContext;
+	(void*)params;
+	int i;
+	int j;
+	int rem;
+	int DataCount = numSamples << 1;
+	static unsigned int lastNumSamps = 0;
+
+	if (reset)
+	{
 #ifdef DEBUG_ENABLE
-   char m_str[1024];
+		char m_str[1024];
+		sprintf_s(m_str, sizeof(m_str), "sdrplayCallbackA: %d", numSamples);
+		OutputDebugString(m_str);
 #endif
+		BufferCounter = 0;
+}
 
-   if (reset)
-   {
+	//Interleave samples
+	for (i = 0, j = 0; i < DataCount; i += 2, j++)
+	{
+		IQBuffer[i] = xi[j];
+		IQBuffer[i + 1] = xq[j];
+	}
+
+	//Fill the callback buffer
+	for (i = 0; i < DataCount;)
+	{
+		rem = DataCount - i;
+		if ((BufferCounter == 0) && (rem >= buffer_len_samples))
+		{
+			// no need to copy, if CallbackBuffer empty and i .. i+buffer_len_samples <= DataCount
+			// this case looks impossible when DataCount = 504 !
+			WinradCallBack(buffer_len_samples / 2, 0, 0, (void*)(&IQBuffer[i]));
+			i += buffer_len_samples;
+		}
+		else if ((BufferCounter + rem) >= buffer_len_samples)
+		{
+			// CallbackBuffer[] will be filled => and WinradCallBack() can be called
+			rem = buffer_len_samples - BufferCounter;
+			memcpy(&CallbackBuffer[BufferCounter], &IQBuffer[i], rem << 1);
+			WinradCallBack(buffer_len_samples / 2, 0, 0, (void*)CallbackBuffer);
+			i += rem;
+			BufferCounter = 0;
+		}
+		else // if (BufferCounter + rem < buffer_len_samples)
+		{
+			// no chance to fill CallbackBuffer[]
+			memcpy(&CallbackBuffer[BufferCounter], &IQBuffer[i], rem << 1);
+			BufferCounter += rem;
+			i += rem;
+		}
+	}
+	return;
+}
+
+void sdrplayCallbackB(short* xi, short* xq, sdrplay_api_StreamCbParamsT* params, unsigned int numSamples, unsigned int reset, void* cbContext)
+{
+	(void*)cbContext;
+	(void*)params;
+	int i;
+	int j;
+	int rem;
+	int DataCount = numSamples << 1;
+	static unsigned int lastNumSamps = 0;
+
+	if (reset)
+	{
 #ifdef DEBUG_ENABLE
-      sprintf_s(m_str, sizeof(m_str), "callbackMirSdr: %d", numSamps);
-      OutputDebugString(m_str);
+		char m_str[1024];
+		sprintf_s(m_str, sizeof(m_str), "sdrplayCallbackA: %d", numSamples);
+		OutputDebugString(m_str);
 #endif
-      BufferCounter = 0;
-   }
+		BufferCounter = 0;
+	}
 
-   //Interleave samples
-   for (i = 0, j = 0; i < DataCount; i += 2, j++)
-   {
-      IQBuffer[i]     = xi[j];
-      IQBuffer[i + 1] = xq[j];
-   }
+	//Interleave samples
+	for (i = 0, j = 0; i < DataCount; i += 2, j++)
+	{
+		IQBuffer[i] = xi[j];
+		IQBuffer[i + 1] = xq[j];
+	}
 
-   //Fill the callback buffer
-   for (i = 0; i < DataCount;)
-   {
-      rem = DataCount - i;
-      if ((BufferCounter == 0) && (rem >= buffer_len_samples))
-      {
-         // no need to copy, if CallbackBuffer empty and i .. i+buffer_len_samples <= DataCount
-         // this case looks impossible when DataCount = 504 !
-         WinradCallBack(buffer_len_samples / 2, 0, 0, (void*)(&IQBuffer[i]));
-         i += buffer_len_samples;
-      }
-      else if ((BufferCounter + rem) >= buffer_len_samples)
-      {
-         // CallbackBuffer[] will be filled => and WinradCallBack() can be called
-         rem = buffer_len_samples - BufferCounter;
-         memcpy(&CallbackBuffer[BufferCounter], &IQBuffer[i], rem << 1);
-         WinradCallBack(buffer_len_samples / 2, 0, 0, (void*)CallbackBuffer);
-         i += rem;
-         BufferCounter = 0;
-      }
-      else // if (BufferCounter + rem < buffer_len_samples)
-      {
-         // no chance to fill CallbackBuffer[]
-         memcpy(&CallbackBuffer[BufferCounter], &IQBuffer[i], rem << 1);
-         BufferCounter += rem;
-         i += rem;
-      }
-   }
-
-   return;
+	//Fill the callback buffer
+	for (i = 0; i < DataCount;)
+	{
+		rem = DataCount - i;
+		if ((BufferCounter == 0) && (rem >= buffer_len_samples))
+		{
+			// no need to copy, if CallbackBuffer empty and i .. i+buffer_len_samples <= DataCount
+			// this case looks impossible when DataCount = 504 !
+			WinradCallBack(buffer_len_samples / 2, 0, 0, (void*)(&IQBuffer[i]));
+			i += buffer_len_samples;
+		}
+		else if ((BufferCounter + rem) >= buffer_len_samples)
+		{
+			// CallbackBuffer[] will be filled => and WinradCallBack() can be called
+			rem = buffer_len_samples - BufferCounter;
+			memcpy(&CallbackBuffer[BufferCounter], &IQBuffer[i], rem << 1);
+			WinradCallBack(buffer_len_samples / 2, 0, 0, (void*)CallbackBuffer);
+			i += rem;
+			BufferCounter = 0;
+		}
+		else // if (BufferCounter + rem < buffer_len_samples)
+		{
+			// no chance to fill CallbackBuffer[]
+			memcpy(&CallbackBuffer[BufferCounter], &IQBuffer[i], rem << 1);
+			BufferCounter += rem;
+			i += rem;
+		}
+	}
+	return;
 }
 
 extern "C"
 bool LIBSDRplay_API __stdcall IQCompensation(bool Enable)
 {
-   mir_sdr_ErrT Error;
+   sdrplay_api_ErrT Error;
 #ifdef DEBUG_ENABLE	
    OutputDebugString("IQCompensation");
-   char *errString = NULL;
+   char errString[1024];
 #endif
 
-   Error = mir_sdr_DCoffsetIQimbalanceControl_fn((unsigned int)Enable, (unsigned int)Enable);						// Reset DC offset correction
-   if (Error != mir_sdr_Success)
+   chParams->ctrlParams.dcOffset.DCenable = (unsigned int)Enable;
+   chParams->ctrlParams.dcOffset.IQenable = (unsigned int)Enable;
+   Error = sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Ctrl_DCoffsetIQimbalance, sdrplay_api_Update_Ext1_None);
+   if (Error != sdrplay_api_Success)
    {
 #ifdef DEBUG_ENABLE
-      sprintf_s(errString, 1024, "%s %d: %s", "Enable/Disable DC/IQ Correction Failed\nERROR", Error, getMirErrText(Error));
-      OutputDebugString(errString);
+	   _stprintf_s(errString, 1024, "Enable/Disable DC/IQ Correction Failed (%s)", sdrplay_api_GetErrorString_fn(Error));
+	   OutputDebugString(errString);
 #endif
       return false;
    }
@@ -2252,6 +2386,7 @@ extern "C"
 int LIBSDRplay_API __stdcall StartHW(unsigned long freq)
 {
 	double sampleRateLocal;
+	char str[255];
 #ifdef DEBUG_ENABLE
 	OutputDebugString("StartHW");
 #endif
@@ -2268,33 +2403,69 @@ int LIBSDRplay_API __stdcall StartHW(unsigned long freq)
 		WinradCallBack(-1, WINRAD_LOCHANGE, 0, NULL);
 		return -1;
 	}
-	mir_sdr_DebugEnable_fn(RSP_DEBUG);
-   mir_sdr_LoModeT loMode = GetLoMode();
-   mir_sdr_SetLoMode_fn(loMode);
-   mir_sdr_SetPpm_fn((double)FqOffsetPPM);
+	sdrplay_api_DebugEnable_fn(chosenDev->dev, (sdrplay_api_DbgLvl_t)RSP_DEBUG);
+	chParams->tunerParams.loMode = GetLoMode();
+	deviceParams->devParams->ppm = (float)FqOffsetPPM;
+
+	sampleRateLocal = samplerates[SampleRateIdx].value;
+
+	if (GainReduction < 20) GainReduction = 20;
+	chParams->tunerParams.gain.gRdB = GainReduction;
+	chParams->tunerParams.gain.LNAstate = (unsigned char)LNAGainReduction;
+
+	if (IFMode == sdrplay_api_IF_Zero)
+		deviceParams->devParams->fsFreq.fsHz = sampleRateLocal * 1e6;
+	else
+		deviceParams->devParams->fsFreq.fsHz = 6000000.0;
+
+	chParams->tunerParams.bwType = Bandwidth;
 #ifdef DEBUG_ENABLE
-   OutputDebugString("Calling mir_sdr_StreamInit_fn");
+	_stprintf_s(str, 255, "StartHW: bwType: %d", (int)chParams->tunerParams.bwType);
+	OutputDebugString(str);
 #endif
-   sampleRateLocal = samplerates[SampleRateIdx].value;
-   if (IFmodeIdx == 1)
-   {
-	   if (Bandwidth == mir_sdr_BW_1_536)
-		   sampleRateLocal = 8.192;
-   }
-   mir_sdr_ErrT err = mir_sdr_StreamInit_fn((int *)&GainReduction, sampleRateLocal, Frequency, Bandwidth, IFMode, LNAEnable, &SystemGainReduction, mir_sdr_USE_SET_GR_ALT_MODE, &SampleCount, callbackMirSdr, gaincallbackMirSdr, (void *)NULL);
+	chParams->tunerParams.ifType = IFMode;
+	chParams->tunerParams.rfFreq.rfHz = freq;
+	chParams->tunerParams.dcOffsetTuner.dcCal = (unsigned char)DcCompensationMode;
+	chParams->tunerParams.dcOffsetTuner.speedUp = 0;
+	chParams->ctrlParams.decimation.enable = (unsigned char)DecimateEnable;
+	chParams->ctrlParams.decimation.decimationFactor = (unsigned char)Decimation[DecimationIdx].DecValue;
+	if (chParams->ctrlParams.decimation.decimationFactor == 0)
+		chParams->ctrlParams.decimation.decimationFactor = 1;
+	chParams->ctrlParams.decimation.wideBandSignal = 1;
+	chParams->ctrlParams.agc.enable = (sdrplay_api_AgcControlT)AGCEnabled;
+	chParams->ctrlParams.agc.setPoint_dBfs = AGCsetpoint;
+
+	cbFns.StreamACbFn = sdrplayCallbackA;
+	cbFns.StreamBCbFn = sdrplayCallbackB;
+	cbFns.EventCbFn = eventCallback;
+
+	if (!Running)
+	{
 #ifdef DEBUG_ENABLE
-   OutputDebugString("mir_sdr_StreamInit_fn completed");
+		OutputDebugString("Calling sdrplay_api_Init_fn");
 #endif
-   if (err == mir_sdr_Success)
-   {
-      IQCompensation(PostTunerDcCompensation);
-      mir_sdr_SetDcMode_fn(DcCompensationMode, 0);
-	  mir_sdr_DecimateControl_fn(DecimateEnable, Decimation[DecimationIdx].DecValue, 0);
-      mir_sdr_AgcControl_fn(AGCEnabled, AGCsetpoint, 0, 0, 0, 0, LNAEnable);
-      Running = true;
-      return buffer_len_samples / 2;
-   }
-   return 0;
+		sdrplay_api_ErrT err = sdrplay_api_Init_fn(chosenDev->dev, &cbFns, NULL);
+
+#ifdef DEBUG_ENABLE
+		OutputDebugString("sdrplay_api_Init_fn completed");
+#endif
+		if (err == sdrplay_api_Success)
+		{
+			Running = true;
+			IQCompensation(PostTunerDcCompensation);
+			return buffer_len_samples / 2;
+		}
+		else
+		{
+			sprintf_s(str, 255, "sdrplay_api_Init Error (%s)", sdrplay_api_GetErrorString_fn(err));
+			OutputDebugString(str);
+		}
+		return 0;
+	}
+	else
+	{
+		return buffer_len_samples / 2;
+	}
 }
 
 extern "C"
@@ -2341,7 +2512,7 @@ char * dayOfTheWeek()
 
 	int wday = timeinfo.tm_wday;
 
-	sprintf_s(ret, 4, "%s", DAY[wday]);
+	_stprintf_s(ret, 4, "%s", DAY[wday]);
 
 	return ret;
 }
@@ -2904,23 +3075,9 @@ long LIBSDRplay_API __stdcall GetHWSR()
 
 	if (IFmodeIdx == 1)
 	{
-		if (samplerates[SampleRateIdx].value == 8.0)
-			SR = (long)(8.192 * 1e6);
-		else
-			SR = (long)(samplerates[SampleRateIdx].value * 1e6);
-
-		if ((((samplerates[SampleRateIdx].value == 8.0) && (Bandwidth == mir_sdr_BW_1_536) && (IFMode == mir_sdr_IF_2_048)) ||
-			 ((samplerates[SampleRateIdx].value == 2.0) && (Bandwidth == mir_sdr_BW_0_200) && (IFMode == mir_sdr_IF_0_450)) ||
-			 ((samplerates[SampleRateIdx].value == 2.0) && (Bandwidth == mir_sdr_BW_0_300) && (IFMode == mir_sdr_IF_0_450)))
-			&& down_conversion_enabled)
+		if (DecimateEnable == 1 && (DecimationIdx > 0))
 		{
-			SR = SR >> 2;
-		}
-
-		if ((samplerates[SampleRateIdx].value == 2.0) && (Bandwidth == mir_sdr_BW_0_600) && (IFMode == mir_sdr_IF_0_450)
-			&& down_conversion_enabled)
-		{
-			SR = SR >> 1;
+			SR = SR / Decimation[DecimationIdx].DecValue;
 		}
 	}
 	else
@@ -2933,6 +3090,10 @@ long LIBSDRplay_API __stdcall GetHWSR()
 	}
 #ifdef DEBUG_ENABLE
 	sprintf_s(str, 255, "SR: %d", SR);
+	OutputDebugString(str);
+#endif
+#ifdef DEBUG_ENABLE
+	_stprintf_s(str, 255, "GetHWSR: Bandwidth: %d", (int)Bandwidth);
 	OutputDebugString(str);
 #endif
 	sprintf_s(str, sizeof(str), "%.2f MHz", (SR / 1e6));
@@ -3009,7 +3170,7 @@ int  LIBSDRplay_API __stdcall SetAttenuator(int atten_idx)
 
 	int pos = gains[atten_idx];
 
-	if (AGCEnabled == mir_sdr_AGC_DISABLE)
+	if (!AGCEnabled)
 	{
 		if (pos != last_gain)
 		{
@@ -3018,7 +3179,7 @@ int  LIBSDRplay_API __stdcall SetAttenuator(int atten_idx)
 			Edit_SetText(GetDlgItem(h_dialog, IDC_GR), GainReductionTxt);
 			SendMessage(GetDlgItem(h_dialog, IDC_GAINSLIDER), TBM_SETPOS, (WPARAM)true, (LPARAM)GainReduction);
 			last_gain = pos;
-		}
+	}
 	}
 	return 0;
 }
@@ -3149,38 +3310,6 @@ void  LIBSDRplay_API __stdcall ExtIoSetSetting(int idx, const char *value)
 }
 
 extern "C"
-void LIBSDRplay_API __stdcall StopHW()
-{
-#ifdef DEBUG_ENABLE
-	OutputDebugString("StopHW");
-#endif
-	Running = false;
-	mir_sdr_StreamUninit_fn();
-}
-
-extern "C"
-void LIBSDRplay_API __stdcall CloseHW()
-{
-#ifdef DEBUG_ENABLE
-	OutputDebugString("CloseHW");
-#endif
-	SaveSettings();
-	if (h_dialog != NULL)
-		DestroyWindow(h_dialog);
-	if (h_AdvancedDialog != NULL)
-		DestroyWindow(h_AdvancedDialog);
-	if (h_ProfilesDialog != NULL)
-		DestroyWindow(h_ProfilesDialog);
-	if (h_HelpDialog != NULL)
-		DestroyWindow(h_HelpDialog);
-	if (h_StationDialog != NULL)
-		DestroyWindow(h_StationDialog);
-	if (h_StationConfigDialog != NULL)
-		DestroyWindow(h_StationConfigDialog);
-	mir_sdr_ReleaseDeviceIdx_fn();
-}
-
-extern "C"
 void LIBSDRplay_API __stdcall ShowGUI() // Hotkeys defined here
 {
 #ifdef DEBUG_ENABLE
@@ -3212,21 +3341,6 @@ void LIBSDRplay_API __stdcall ShowGUI() // Hotkeys defined here
 	}
 	ShowWindow(h_dialog, SW_SHOW);
 	BringWindowToTop(h_dialog);
-}
-
-extern "C"
-void LIBSDRplay_API  __stdcall HideGUI()
-{
-#ifdef DEBUG_ENABLE
-	OutputDebugString("HideGUI");
-#endif
-	int i;
-	for (i = 1; i <= NUM_OF_HOTKEYS; i++)
-	{
-		UnregisterHotKey(h_dialog, i);
-	}
-	ShowWindow(h_dialog,SW_HIDE);
-	definedHotkeys = false;
 }
 
 extern "C"
@@ -3312,16 +3426,16 @@ int FindSampleRateIdx(double WantedSampleRate)
 void SaveSettings()
 {
 	HKEY Settingskey;
-	int error, AGC, LOAuto, PostDcComp, LNAEN, SL, tempVar;
+	int error, AGC, LOAuto, PostDcComp, SL, tempVar;
 	DWORD dwDisposition;
 
-	error = RegOpenKeyEx(HKEY_CURRENT_USER, TEXT("Software\\SDRplay\\Settings"), 0, KEY_ALL_ACCESS, &Settingskey);
+	error = RegOpenKeyEx(HKEY_CURRENT_USER, TEXT("Software\\SDRplay\\RSP1_Settings"), 0, KEY_ALL_ACCESS, &Settingskey);
 	if (error != ERROR_SUCCESS)
 	{ 
 		if (error == ERROR_FILE_NOT_FOUND)
 		{
 			//Need to create registry entry.
-			error = RegCreateKeyEx(HKEY_CURRENT_USER, TEXT("Software\\SDRplay\\Settings"), 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Settingskey, &dwDisposition);
+			error = RegCreateKeyEx(HKEY_CURRENT_USER, TEXT("Software\\SDRplay\\RSP1_Settings"), 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Settingskey, &dwDisposition);
 		}
 		else
 		{
@@ -3377,10 +3491,10 @@ void SaveSettings()
 	if (error != ERROR_SUCCESS)
 		MessageBox(NULL, "Failed to save Frequency", NULL, MB_OK);
 
-	if (AGCEnabled == mir_sdr_AGC_DISABLE)
-		AGC = 0;
-	else
+	if (AGCEnabled)
 		AGC = 1;
+	else
+		AGC = 0;
 	error = RegSetValueEx(Settingskey, TEXT("AGCEnabled"), 0, REG_DWORD, (LPBYTE)&AGC, sizeof(AGC));
 	if (error != ERROR_SUCCESS)
 		MessageBox(NULL, "Failed to save AGC Setting", NULL, MB_OK);
@@ -3430,14 +3544,9 @@ void SaveSettings()
 	if (error != ERROR_SUCCESS)
 		MessageBox(NULL, "Failed to save Post DC Compensation Setting", NULL, MB_OK);
 
-	if (LNAEnable)
-		LNAEN = 1;
-	else
-		LNAEN = 0;
-	error = RegSetValueEx(Settingskey, TEXT("LNAEnabled"), 0, REG_DWORD, (LPBYTE)&LNAEN, sizeof(LNAEN));
+	error = RegSetValueEx(Settingskey, TEXT("LNAGainReduction"), 0, REG_DWORD, (LPBYTE)&LNAGainReduction, sizeof(LNAGainReduction));
 	if (error != ERROR_SUCCESS)
-		MessageBox(NULL, "Failed to save LNA Setting", NULL, MB_OK);
-
+		MessageBox(NULL, "Failed to save LNA gain reduction value", NULL, MB_OK);
 
 	if (_tcscmp(p1fname, _T("")) != 0)
 	{
@@ -3555,7 +3664,7 @@ void LoadSettings()
 	DoubleSz = sizeof(double);
 	IntSz = sizeof(int);
 
-	error = RegOpenKeyEx(HKEY_CURRENT_USER, TEXT("Software\\SDRplay\\Settings"), 0, KEY_ALL_ACCESS, &Settingskey);
+	error = RegOpenKeyEx(HKEY_CURRENT_USER, TEXT("Software\\SDRplay\\RSP1_Settings"), 0, KEY_ALL_ACCESS, &Settingskey);
 	if (error == ERROR_SUCCESS)
 	{
 		error = RegQueryValueEx(Settingskey, "LowerFqLimit", NULL, NULL, (LPBYTE)&LowerFqLimit, &IntSz);
@@ -3663,8 +3772,9 @@ void LoadSettings()
 #ifdef DEBUG_ENABLE
 			OutputDebugString("Failed to recall saved IF mode");
 #endif
-			IFmodeIdx = 0;
+			IFmodeIdx = 1;
 		}
+		Edit_Enable(GetDlgItem(h_dialog, IDC_IFMODE), 1);
 
 		error = RegQueryValueEx(Settingskey, "FreqTrim", NULL, NULL, (LPBYTE)&FqOffsetPPM, &IntSz);
 		if (error != ERROR_SUCCESS)
@@ -3682,14 +3792,14 @@ void LoadSettings()
 #ifdef DEBUG_ENABLE
 			OutputDebugString("Failed to recall saved AGCEnabled state");
 #endif
-			AGCEnabled = mir_sdr_AGC_5HZ;
+			AGCEnabled = false;
 		}
 		else
 		{
 			if (tempRB == 1)
-				AGCEnabled = mir_sdr_AGC_5HZ;
+				AGCEnabled = true;
 			else
-				AGCEnabled = mir_sdr_AGC_DISABLE;
+				AGCEnabled = false;
 		}
 
 		tempRB = 0;
@@ -3796,21 +3906,13 @@ void LoadSettings()
 				PostTunerDcCompensation = false;
 		}
 
-		tempRB = 0;
-		error = RegQueryValueEx(Settingskey, "LNAEnabled", NULL, NULL, (LPBYTE)&tempRB, &IntSz);
+		error = RegQueryValueEx(Settingskey, "LNAGainReduction", NULL, NULL, (LPBYTE)&LNAGainReduction, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
 #ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall saved LNAEnabled state");
+			OutputDebugString("Failed to recall saved LNAGainReduction value");
 #endif
-			LNAEnable = true;
-		}
-		else
-		{
-			if (tempRB == 1)
-				LNAEnable = true;
-			else
-				LNAEnable = false;
+			LNAGainReduction = 4;
 		}
 	}
 	else
@@ -3821,17 +3923,17 @@ void LoadSettings()
 		RefreshPeriodMemory = 2;
 		Frequency = 98.8;
 		LOplan = LO120MHz;
-		GainReduction = 50;
+		GainReduction = INITIAL_GR;
 		AGCsetpoint = -30;
 		SampleRateIdx = 0;
 		DecimationIdx = 0;
 		BandwidthIdx = 3;
-		IFmodeIdx = 0;
+		IFmodeIdx = 1;
 		FqOffsetPPM = 0;
-		AGCEnabled = mir_sdr_AGC_5HZ;
+		AGCEnabled = false;
 		LOplanAuto = true;
 		PostTunerDcCompensation = true;
-		LNAEnable = true;
+		LNAGainReduction = 0;
 		stationLookup = false;
 		workOffline = false;
 		ITUIndex = 0;
@@ -3855,10 +3957,8 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 //	OPENFILENAME ofn = { 0 };
 //	TCHAR szFileName[MAX_PATH] = _T("");
 	TCHAR str[255];
-	int FreqBand = 0;
 	bool DeltaPosClick = false;
 	int i;
-	int locAGC = 1;
 
 	switch (uMsg)
 	{
@@ -3867,16 +3967,16 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 			{
 			case 1:
 				// ALT-A = AGC toggle
-				if (AGCEnabled == mir_sdr_AGC_DISABLE)
+				if (!AGCEnabled)
 				{
-					AGCEnabled = mir_sdr_AGC_5HZ;
+					AGCEnabled = true;
 					SendMessage(GetDlgItem(hwndDlg, IDC_RSPAGC), BM_SETCHECK, (WPARAM)(1), 0);
 					Edit_Enable(GetDlgItem(hwndDlg, IDC_GR), 0);
 					Edit_Enable(GetDlgItem(hwndDlg, IDC_GAINSLIDER), 0);
 				}
 				else
 				{
-					AGCEnabled = mir_sdr_AGC_DISABLE;
+					AGCEnabled = false;
 					SendMessage(GetDlgItem(hwndDlg, IDC_RSPAGC), BM_SETCHECK, (WPARAM)(0), 0);
 					Edit_Enable(GetDlgItem(hwndDlg, IDC_GR), 1);
 					Edit_Enable(GetDlgItem(hwndDlg, IDC_GAINSLIDER), 1);
@@ -3886,12 +3986,12 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 			case 2:
 			case 4:
 				// - = Increase Gain Reduction
-				if (AGCEnabled == mir_sdr_AGC_DISABLE)
+				if (!AGCEnabled)
 				{
 					GainReduction += 1;
-					if (GainReduction >= 78)
+					if (GainReduction >= GAIN_SLIDER_MAX)
 					{
-						GainReduction = 78;
+						GainReduction = GAIN_SLIDER_MAX;
 					}
 					sprintf_s(GainReductionTxt, 254, "%d", GainReduction);
 					Edit_SetText(GetDlgItem(hwndDlg, IDC_GR), GainReductionTxt);
@@ -3902,12 +4002,12 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 			case 3:
 			case 5:
 				// + = Decrease Gain Reduction
-				if (AGCEnabled == mir_sdr_AGC_DISABLE)
+				if (!AGCEnabled)
 				{
 					GainReduction -= 1;
-					if (GainReduction <= 19)
+					if (GainReduction <= GAIN_SLIDER_MIN)
 					{
-						GainReduction = 19;
+						GainReduction = GAIN_SLIDER_MIN;
 					}
 					sprintf_s(GainReductionTxt, 254, "%d", GainReduction);
 					Edit_SetText(GetDlgItem(hwndDlg, IDC_GR), GainReductionTxt);
@@ -4107,26 +4207,10 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 			Edit_Enable(GetDlgItem(hwndDlg, IDC_GAINSLIDER), 1);
 			SendMessage(GetDlgItem(hwndDlg, IDC_GAINSLIDER), TBM_SETPOS, (WPARAM)true, (LPARAM)GainReduction);
 			Edit_Enable(GetDlgItem(hwndDlg, IDC_GAINSLIDER), 0);
-
-         if (LNAEnable)
-         {
-            Edit_SetText(GetDlgItem(hwndDlg, IDC_LNAGR), "LNA GR 0 dB");
-            Edit_SetText(GetDlgItem(hwndDlg, IDC_LNASTATE), "LNA ON");
-            //SendMessage(GetDlgItem(hwndDlg, IDC_LNAGR_SWITCH), BM_SETCHECK, BST_CHECKED, 0);
-         }
-         else
-         {
-            sprintf_s(str, sizeof(str), "%s %d %s", "LNA GR", LnaGr, "dB");
-            Edit_SetText(GetDlgItem(hwndDlg, IDC_LNAGR), str);
-            Edit_SetText(GetDlgItem(hwndDlg, IDC_LNASTATE), "LNA OFF");
-            //SendMessage(GetDlgItem(hwndDlg, IDC_LNAGR_SWITCH), BM_SETCHECK, BST_UNCHECKED, 0);
-         }
-
-		sprintf_s(str, sizeof(str), "IF Gain Reduction %d dB", GainReduction);
-		Edit_SetText(GetDlgItem(hwndDlg, IDC_IFGR), str);
-		sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
-		Edit_SetText(GetDlgItem(hwndDlg, IDC_TOTALGR), str);
-		break;
+         
+			sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
+			Edit_SetText(GetDlgItem(hwndDlg, IDC_TOTALGR), str);
+			break;
 
 		case WM_NOTIFY:
 			nFrom = ((LPNMHDR)lParam)->code;
@@ -4201,8 +4285,42 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 				GainReduction = pos;
 				sprintf_s(GainReductionTxt, 254, "%d", pos);
 				Edit_SetText(GetDlgItem(hwndDlg, IDC_GR), GainReductionTxt);
-//				ProgramGr((int *)&GainReduction, &SystemGainReduction, LNAGainReduction, 1);
+				chParams->tunerParams.gain.gRdB = GainReduction;
+				if (!Running)
+				{
+					SystemGainReduction = GainReduction + ActualLNAGR;
+				}
+				else
+				{
+					sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_Gr, sdrplay_api_Update_Ext1_None);
+				}
+				sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
+				Edit_SetText(GetDlgItem(hwndDlg, IDC_TOTALGR), str);
 				profileChanged = true;
+				break;
+			}
+
+			if ((HWND)lParam == GetDlgItem(hwndDlg, IDC_LNASLIDER))
+			{
+				TCHAR LNAGainReductionTxt[255];
+#ifdef DEBUG_ENABLE
+				OutputDebugString("LNA Slider VM Scroll");
+#endif
+				int pos = SendMessage(GetDlgItem(hwndDlg, IDC_LNASLIDER), TBM_GETPOS, (WPARAM)0, (LPARAM)0);
+				LNAGainReduction = pos;
+				sprintf_s(str, 255, "LNA Slider Position is =  %d", LNAGainReduction);
+				OutputDebugString(str);
+				sprintf_s(LNAGainReductionTxt, 254, "%d", pos);
+				Edit_SetText(GetDlgItem(hwndDlg, IDC_LNAGRNO), LNAGainReductionTxt);
+				chParams->tunerParams.gain.LNAstate = (unsigned char)LNAGainReduction;
+				if (Running)
+				{
+					sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_Gr, sdrplay_api_Update_Ext1_None);
+				}
+				sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
+				Edit_SetText(GetDlgItem(hwndDlg, IDC_TOTALGR), str);
+				profileChanged = true;
+				break;
 			}
 			break;
 			
@@ -4210,8 +4328,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 			// Buffer size
 
 			ghwndDlg = hwndDlg;
-			TCHAR SampleRateTxt[255];
-			TCHAR DecimationTxt[255];
+			TCHAR LNAGainReductionTxt[255];
 
 			LoadSettings();
 			//Buffer Size (currently not used)
@@ -4229,21 +4346,26 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 			ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFMODE), str);
 			_stprintf_s(str, 255, "Low IF");
 			ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFMODE), str);
+
 			ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_IFMODE), IFmodeIdx);
 
+			if (IFmodeIdx == 1)
+				Edit_Enable(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 0);
+
 			//Add Filter BW based on IF mode Selection then select stored BW.
+			ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_IFBW));
+			_stprintf_s(str, 255, "200 kHz");
+			ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
+			_stprintf_s(str, 255, "300 kHz");
+			ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
+			_stprintf_s(str, 255, "600 kHz");
+			ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
+			_stprintf_s(str, 255, "1.536 MHz");
+			ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
+
 			if (IFmodeIdx == 0)
 			{
-				IFMode = mir_sdr_IF_Zero;
-				ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_IFBW));
-				_stprintf_s(str, 255, "200 kHz");
-				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-				_stprintf_s(str, 255, "300 kHz");
-				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-				_stprintf_s(str, 255, "600 kHz");
-				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-				_stprintf_s(str, 255, "1.536 MHz");
-				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
+				IFMode = sdrplay_api_IF_Zero;
 				_stprintf_s(str, 255, "5.000 MHz");
 				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
 				_stprintf_s(str, 255, "6.000 MHz");
@@ -4252,54 +4374,39 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
 				_stprintf_s(str, 255, "8.000 MHz");
 				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-				ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_IFBW), BandwidthIdx);
 			}
-			else
-			{
-				ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_IFBW));
-				_stprintf_s(str, 255, "200 kHz");
-				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-				_stprintf_s(str, 255, "300 kHz");
-				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-				_stprintf_s(str, 255, "600 kHz");
-				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-				_stprintf_s(str, 255, "1.536 MHz");
-				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-				ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_IFBW), BandwidthIdx);
-			}	
-//			BandwidthIdx = ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_IFBW), BandwidthIdx);
+
+			ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_IFBW), BandwidthIdx);
 			Bandwidth = bandwidths[BandwidthIdx].bwType;
+#ifdef DEBUG_ENABLE
+			_stprintf_s(str, 255, "MainDlgProc(WM_INITDIALOG): Bandwidth: %d", (int)Bandwidth);
+			OutputDebugString(str);
+#endif
+
 
 			//Add Samplerates based Filter BW  & IF mode then select stored Samplerate.
 			if (IFmodeIdx == 1)
 			{
-				//Disable Sample Rate Display & Decimation Dialog Boxes
-				Edit_Enable(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 0);
-				Edit_Enable(GetDlgItem(hwndDlg, IDC_DECIMATION), 0);
+				ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_SAMPLERATE));
+				_stprintf_s(str, 255, TEXT("2.0"));
+				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_SAMPLERATE), str);
 
-				//LIF Mode
-				if (Bandwidth == mir_sdr_BW_1_536)
-				{
-					IFMode = mir_sdr_IF_2_048;
-					ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_SAMPLERATE));
-					_stprintf_s(str, 255, TEXT("%.2f"), 8.192);
-					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_SAMPLERATE), str);
-					ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 0);
-				}
-					if (Bandwidth == mir_sdr_BW_0_200 || Bandwidth == mir_sdr_BW_0_300 || Bandwidth == mir_sdr_BW_0_600)
-				{
-					IFMode = mir_sdr_IF_0_450;
-					ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_SAMPLERATE));
-					_stprintf_s(str, 255, TEXT("%.2f"), 2.0);
-					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_SAMPLERATE), str);
-					ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 0);
-				}
+				chParams->tunerParams.ifType = sdrplay_api_IF_1_620;
+
+				if (Running)
+					sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_IfType, sdrplay_api_Update_Ext1_None);
+
+				SampleRateIdx = 0; // Always 2.0 MHz
+
+				ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 0);
+
+				//Disable Sample Rate Dialog Box if in LowIF mode
+				Edit_Enable(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 0);
 			}
 			else
 			{
 				//Enable Sample Rate Display & Decimation Dialog Boxes
 				Edit_Enable(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 1);
-				Edit_Enable(GetDlgItem(hwndDlg, IDC_DECIMATION), 1);
 
 				//ZIF Mode
 				SrCount = (sizeof(samplerates) / sizeof(samplerates[0]));
@@ -4308,87 +4415,54 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 				BW = (float)bandwidths[BandwidthIdx].BW;
 
 				//Add Sample rates to dialog box based on calculated Minimum & identify chosen rate on way through.
-				int target = 0;
-				ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_SAMPLERATE));
-				for (i = 0; i < SrCount; i++)
-				{
-					SR = samplerates[i].value + 0.06;
-					if (SR > BW)   //BW = minimum sample rate.
-					{
-						_stprintf_s(str, 255, TEXT("%.2f"), samplerates[i].value);
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_SAMPLERATE), str);
-						if (samplerates[i].value == samplerates[SampleRateIdx].value)
-							target = i;
-					}
-					ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_SAMPLERATE), target);
-				}
+				Reset_SAMPLERATE(hwndDlg);
 			}
 
 			//Populate Decimate Control With Appropriate Sample rates
 			ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_DECIMATION));
 			_stprintf_s(str, 255, "None");
 			ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
+			_stprintf_s(str, 255, "2");
+			ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
+			_stprintf_s(str, 255, "4");
+			ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
+			_stprintf_s(str, 255, "8");
+			ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
 
-			for (i = 1; i < (sizeof(Decimation) / sizeof(Decimation[0])); i++)
-				if ((samplerates[SampleRateIdx].value / Decimation[i].DecValue) >= (float)bandwidths[BandwidthIdx].BW)
-				{
-#ifdef DEBUG_ENABLE
-					_stprintf_s(str, 255, "decimation Values permitted: %d, SR: %f, BW: %f", Decimation[i].DecValue, samplerates[SampleRateIdx].value, (float)bandwidths[BandwidthIdx].BW);
-					OutputDebugString(str);
-#endif
-					_stprintf_s(str, 255, TEXT("%d"), Decimation[i].DecValue);
-					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-				}
-			if (IFmodeIdx == 0)
+			if (IFmodeIdx == 0 && SampleRateIdx >= 2)
 			{
-				ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_DECIMATION), DecimationIdx);
+				_stprintf_s(str, 255, "16");
+				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
 			}
-			else
-			{
-				if (Bandwidth == mir_sdr_BW_0_600)
-					DecimationIdx = 1;
-				else
-					DecimationIdx = 2;
 
-				ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_DECIMATION), DecimationIdx);
+			if (IFmodeIdx == 0 && SampleRateIdx >= 6)
+			{
+				_stprintf_s(str, 255, "32");
+				ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
 			}
+
+
+			ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_DECIMATION), DecimationIdx);
 
 			DecimateEnable = 0;
-			if (DecimationIdx > 0 && (IFmodeIdx == 0))
+			if (DecimationIdx > 0)
 				DecimateEnable = 1;
 
 			WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
 
-			// LNA Enable
-			if (LNAEnable)
-			{
-				SendMessage(GetDlgItem(hwndDlg, IDC_LNAGR_SWITCH), BM_SETCHECK, BST_CHECKED, 0);
-			}
-			else
-			{
-				SendMessage(GetDlgItem(hwndDlg, IDC_LNAGR_SWITCH), BM_SETCHECK, BST_UNCHECKED, 0);
-			}
-
-			//// Decimation
-			//ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_DECIMATION));
-			//_stprintf_s(str, 255, "None");
-			//ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-			//_stprintf_s(str, 255, "2");
-			//ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-			//_stprintf_s(str, 255, "4");
-			//ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-			//_stprintf_s(str, 255, "8");
-			//ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-			//_stprintf_s(str, 255, "16");
-			//ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-			//ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_DECIMATION), DecimationIdx);
-
 			//Gain Reduction
 			sprintf_s(GainReductionTxt, 254, "%d", GainReduction);
-			SendMessage(GetDlgItem(hwndDlg, IDC_GAINSLIDER), TBM_SETRANGEMIN, (WPARAM)true, (LPARAM)19);
-			SendMessage(GetDlgItem(hwndDlg, IDC_GAINSLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)78);
+			SendMessage(GetDlgItem(hwndDlg, IDC_GAINSLIDER), TBM_SETRANGEMIN, (WPARAM)true, (LPARAM)GAIN_SLIDER_MIN);
+			SendMessage(GetDlgItem(hwndDlg, IDC_GAINSLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)GAIN_SLIDER_MAX);
 			SendMessage(GetDlgItem(hwndDlg, IDC_GAINSLIDER), TBM_SETPOS, (WPARAM)true, (LPARAM)GainReduction);
 			Edit_SetText(GetDlgItem(hwndDlg, IDC_GR), GainReductionTxt);
+
+			// LNA Gain Reduction
+			sprintf_s(LNAGainReductionTxt, 254, "%d", LNAGainReduction);
+			SendMessage(GetDlgItem(hwndDlg, IDC_LNASLIDER), TBM_SETRANGEMIN, (WPARAM)true, (LPARAM)LNA_GAIN_SLIDER_MIN);
+			SendMessage(GetDlgItem(hwndDlg, IDC_LNASLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)LNA_GAIN_SLIDER_MAX);
+			SendMessage(GetDlgItem(hwndDlg, IDC_LNASLIDER), TBM_SETPOS, (WPARAM)true, (LPARAM)LNAGainReduction);
+			Edit_SetText(GetDlgItem(hwndDlg, IDC_LNAGRNO), LNAGainReductionTxt);
 
 			//ADC Setpoint
 			sprintf_s(AGCsetpointTxt, 254, "%d", AGCsetpoint);
@@ -4401,27 +4475,14 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 			Edit_SetText(GetDlgItem(hwndDlg, IDC_PPM), FreqoffsetTxt);
 
 			//AGC Enabled
-			if (AGCEnabled == mir_sdr_AGC_DISABLE)
-				locAGC = 0;
-			SendMessage(GetDlgItem(hwndDlg, IDC_RSPAGC), BM_SETCHECK, (WPARAM)(locAGC ? BST_CHECKED : BST_UNCHECKED), (LPARAM)0);
-			SendMessage(GetDlgItem(hwndDlg, IDC_GR), WM_ENABLE, (WPARAM)(locAGC ? 0 : 1), 1);
+			SendMessage(GetDlgItem(hwndDlg, IDC_RSPAGC), BM_SETCHECK, (WPARAM)(AGCEnabled ? BST_CHECKED : BST_UNCHECKED), (LPARAM)0);
+			Edit_Enable(GetDlgItem(hwndDlg, IDC_GAINSLIDER), (AGCEnabled ? 0 : 1));
+			SendMessage(GetDlgItem(hwndDlg, IDC_GR), WM_ENABLE, (WPARAM)(AGCEnabled ? 0 : 1), 1);
+//			if (AGCEnabled)
+//				m_timer = SetTimer(hwndDlg, ID_AGCUPDATE, 600, NULL);
 
-			FreqBand = 0;
-			while (Frequency > band_fmin[FreqBand + 1] && FreqBand + 1 < NUM_BANDS)
-				FreqBand++;
-
-			sprintf_s(str, sizeof(str), "IF Gain Reduction %d dB", GainReduction);
-			Edit_SetText(GetDlgItem(hwndDlg, IDC_IFGR), str);
-			if (LNAEnable)
-			{
-				sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", GainReduction);
-				Edit_SetText(GetDlgItem(hwndDlg, IDC_TOTALGR), str);
-			}
-			else
-			{
-				sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", GainReduction + band_LNAgain[FreqBand]);
-				Edit_SetText(GetDlgItem(hwndDlg, IDC_TOTALGR), str);
-			}
+			sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
+			Edit_SetText(GetDlgItem(hwndDlg, IDC_TOTALGR), str);
 
 			if (h_AdvancedDialog == NULL)
 			{
@@ -4462,14 +4523,10 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 			CtrlID = GetDlgCtrlID((HWND)lParam);
 			switch (CtrlID)
 			{
-			//case (IDC_STATIC1) :
-			case (IDC_IFGR):
 			case (IDC_TOTALGR):
-			case (IDC_LNAGR):
-			case (IDC_LNASTATE):
-			case (IDC_LNAGR_SWITCH):
 			case (IDC_FINALSR):
-			case (IDC_OVERLOAD) :
+			case (IDC_PPMTXT):
+			case (IDC_OVERLOAD):
 					HDC hdcStatic = (HDC)wParam;
 					SetBkColor(hdcStatic, RGB(255, 255, 255));
 					if (CtrlID == IDC_OVERLOAD)
@@ -4527,95 +4584,49 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 					return true;
 				}
 				break;
-			
+
 			case IDC_SAMPLERATE:
 				if (GET_WM_COMMAND_CMD(wParam, lParam) == CBN_SELCHANGE)
 				{
-					double WantedSR;
-//					float a;
-
-					Edit_GetText(GetDlgItem(hwndDlg, IDC_SAMPLERATE), SampleRateTxt, 255);
-					WantedSR = atof(SampleRateTxt);
-
-#ifdef DEBUG_ENABLE
-					sprintf_s(str, 255, "WantedSR: %f", WantedSR);
-					OutputDebugString(str);
-#endif
-
-					SampleRateIdx = FindSampleRateIdx(WantedSR);
-
-#ifdef DEBUG_ENABLE
-					sprintf_s(str, 255, "SampleRateIdx: %d", SampleRateIdx);
-					OutputDebugString(str);
-#endif
-
-					mir_sdr_DecimateControl_fn(0, 0, 0);
-					DecimationIdx = 0;
-					DecimateEnable = 0;
-
-					//Populate Decimate Control With Appropriate Sample rates
-					ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_DECIMATION));
-					_stprintf_s(str, 255, "None");
-					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-
-					for (i = 1; i < (sizeof(Decimation) / sizeof(Decimation[0])); i++)
-						if ((samplerates[SampleRateIdx].value / Decimation[i].DecValue) >= (float)bandwidths[BandwidthIdx].BW)
-						{
-#ifdef DEBUG_ENABLE
-							_stprintf_s(str, 255, "decimation Values permitted: %d, SR: %f, BW: %f", Decimation[i].DecValue, samplerates[SampleRateIdx].value, (float)bandwidths[BandwidthIdx].BW);
-							OutputDebugString(str);
-#endif
-							_stprintf_s(str, 255, TEXT("%d"), Decimation[i].DecValue);
-							ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-						}
-
-					ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_DECIMATION), DecimationIdx);
-					if (Running)
+					if (ComboBox_GetCurSel(GET_WM_COMMAND_HWND(wParam, lParam)) != SampleRateIdx)
 					{
-						mir_sdr_Reinit_fn(pZERO, samplerates[SampleRateIdx].value, 0.0, mir_sdr_BW_Undefined, mir_sdr_IF_Undefined, mir_sdr_LO_Undefined, 0, pZERO, mir_sdr_USE_SET_GR_ALT_MODE, pZERO, (mir_sdr_ReasonForReinitT)(mir_sdr_CHANGE_FS_FREQ));
+#ifdef DEBUG_ENABLE
+						OutputDebugString("IDC_SAMPLERATE");
+#endif
+						SampleRateIdx = ComboBox_GetCurSel(GET_WM_COMMAND_HWND(wParam, lParam));
+
+						deviceParams->devParams->fsFreq.fsHz = samplerates[SampleRateIdx].value * 1e6;
+
+						Reset_DECIMATION(hwndDlg);
+						Update_IFBW();
+
+						ReinitAll();
+						UpdateSR();
 					}
-					WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
-					return true;
 				}
 				break;
 
 			case IDC_DECIMATION:
 				if (GET_WM_COMMAND_CMD(wParam, lParam) == CBN_SELCHANGE)
 				{
-#ifdef DEBUG_ENABLE
-					OutputDebugString("IDC_DECIMATION Changed");
-#endif
-//					double WantedSR;
-					int decValue;
-
-					DecimationIdx = ComboBox_GetCurSel(GET_WM_COMMAND_HWND(wParam, lParam));
-					SendMessage(GetDlgItem(hwndDlg, IDC_DECIMATION), CB_GETLBTEXT, DecimationIdx, (LPARAM)DecimationTxt);
-					decValue = atoi(DecimationTxt);
-
-					if (DecimationIdx == 0)
+					if (ComboBox_GetCurSel(GET_WM_COMMAND_HWND(wParam, lParam)) != DecimationIdx)
 					{
 #ifdef DEBUG_ENABLE
-						OutputDebugString("Decimation disabled");
+						OutputDebugString("IDC_DECIMATION");
 #endif
-						DecimateEnable = 0;
-						mir_sdr_DecimateControl_fn(DecimateEnable, 0, 0);
-						WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
-						return true;
-					}
-					else
-					{
-#ifdef DEBUG_ENABLE
-						OutputDebugString("Decimation Enabled");
-#endif
-						DecimateEnable = 1;
-						mir_sdr_DecimateControl_fn(DecimateEnable, decValue, 0);
-						//SampleRateIdx = FindSampleRateIdx(WantedSR);
-						WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
-						return true;
+						DecimationIdx = ComboBox_GetCurSel(GET_WM_COMMAND_HWND(wParam, lParam));
+
+						int decValue = Decimation[DecimationIdx].DecValue;
+
+						Update_IFBW();
+
+						ApplyDecimation(decValue);
+
+						UpdateSR();
 					}
 				}
 				break;
-			
+
 			case IDC_BUFFER:
 				if (GET_WM_COMMAND_CMD(wParam, lParam) == CBN_SELCHANGE)
 				{
@@ -4640,19 +4651,24 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 					{
 						if (Button_GetCheck(GET_WM_COMMAND_HWND(wParam, lParam)) == BST_CHECKED) //it is checked
 						{
-							AGCEnabled = mir_sdr_AGC_5HZ;
+							AGCEnabled = true;
+							chParams->ctrlParams.agc.enable = sdrplay_api_AGC_5HZ;
 							Edit_Enable(GetDlgItem(hwndDlg, IDC_GR), 0);
 							Edit_Enable(GetDlgItem(hwndDlg, IDC_GAINSLIDER), 0);
+							//							m_timer = SetTimer(hwndDlg, ID_AGCUPDATE, 600, NULL);
+														//MessageBox(NULL, "Timer enabled", NULL, MB_OK);
 						}
 						else
 						{
-							AGCEnabled = mir_sdr_AGC_DISABLE;
+							AGCEnabled = false;
+							chParams->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
 							Edit_Enable(GetDlgItem(hwndDlg, IDC_GR), 1);
 							Edit_Enable(GetDlgItem(hwndDlg, IDC_GAINSLIDER), 1);
+							//							KillTimer(hwndDlg, ID_AGCUPDATE);
 						}
 						if (Running)
 						{
-							mir_sdr_AgcControl_fn(AGCEnabled, AGCsetpoint, 0, 0, 0, 0, LNAEnable);
+							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Ctrl_Agc, sdrplay_api_Update_Ext1_None);
 						}
 					}
 					return true;
@@ -4666,13 +4682,16 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 					// need to have error checking applied here.
 					Edit_GetText((HWND)lParam, SP, 255);
 					if (ghwndDlg)	// update only when already initialized!
+					{
 						AGCsetpoint = _ttoi(SP);
+						chParams->ctrlParams.agc.setPoint_dBfs = AGCsetpoint;
+					}
 					if (Running)
-						mir_sdr_AgcControl_fn(AGCEnabled, AGCsetpoint, 0, 0, 0, 0, LNAEnable);
+						sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Ctrl_Agc, sdrplay_api_Update_Ext1_None);
 					return true;
 				}
 				break;
-			
+
 			case IDC_PPM:
 				if (GET_WM_COMMAND_CMD(wParam, lParam) == EN_UPDATE)
 				{
@@ -4680,53 +4699,14 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 					if (!DeltaPosClick)
 						Edit_GetText(GetDlgItem(hwndDlg, IDC_PPM), Freqoffset, 255);
 					FqOffsetPPM = (float)atof(Freqoffset);
+					deviceParams->devParams->ppm = FqOffsetPPM;
 
 					DeltaPosClick = false;
 					if (Running)
-					{
-#ifdef DEBUG_ENABLE
-						OutputDebugString("Call PPM Function");
-#endif
-						mir_sdr_SetPpm_fn((double)FqOffsetPPM);
-					}
+						sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Dev_Ppm, sdrplay_api_Update_Ext1_None);
 					return true;
 				}
 				break;
-			
-			case IDC_GR:
-				if (GET_WM_COMMAND_CMD(wParam, lParam) == EN_UPDATE)
-				{
-					TCHAR GR[255];
-					if (AGCEnabled == mir_sdr_AGC_DISABLE)
-					{
-						Edit_GetText((HWND)lParam, GR, 255);
-						if (ghwndDlg)	// update only when already initialized!
-							GainReduction = _ttoi(GR);
-
-                  if (Running)
-                  {
-                     ProgramGr((int *)&GainReduction, &SystemGainReduction, (int)LNAEnable, 1);
-                  }
-                  else
-                  {
-                     mir_sdr_GetGrByFreq_fn(Frequency, (mir_sdr_BandT *)&FreqBand, (int *)&GainReduction, LNAEnable, &SystemGainReduction, mir_sdr_USE_SET_GR_ALT_MODE);
-                  }
-
-						SendMessage(GetDlgItem(hwndDlg, IDC_GAINSLIDER), TBM_SETPOS, (WPARAM)true, (LPARAM)GainReduction);
-
-                  sprintf_s(str, sizeof(str), "IF Gain Reduction %d dB", GainReduction);
-						Edit_SetText(GetDlgItem(hwndDlg, IDC_IFGR), str);
-                  sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
-						Edit_SetText(GetDlgItem(hwndDlg, IDC_TOTALGR), str);
-
-						return true;
-					}
-               else
-               {
-						return true;
-					}
-				}
-				return true;
 
 			case IDC_EXIT:
 				if (GET_WM_COMMAND_CMD(wParam, lParam) == BN_CLICKED)
@@ -4753,9 +4733,9 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 					_stprintf_s(str, TEXT("Current Profile: Default"));
 					Edit_SetText(GetDlgItem(hwndDlg, IDC_ProfileFileName), str);
 
-					//IF Mode
-					IFMode = mir_sdr_IF_Zero;
-					IFmodeIdx = 0;
+					Edit_Enable(GetDlgItem(hwndDlg, IDC_IFMODE), 1);
+
+					IFmodeIdx = 1;
 					ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_IFMODE), IFmodeIdx);
 
 					//Bandwidth
@@ -4768,72 +4748,77 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
 					_stprintf_s(str, 255, "1.536 MHz");
 					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-					_stprintf_s(str, 255, "5.000 MHz");
-					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-					_stprintf_s(str, 255, "6.000 MHz");
-					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-					_stprintf_s(str, 255, "7.000 MHz");
-					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-					_stprintf_s(str, 255, "8.000 MHz");
-					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
 					BandwidthIdx = 3;
-					BandwidthIdx = ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_IFBW), BandwidthIdx);
+					ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_IFBW), BandwidthIdx);
 					Bandwidth = bandwidths[BandwidthIdx].bwType;
+					chParams->tunerParams.bwType = Bandwidth;
+#ifdef DEBUG_ENABLE
+					_stprintf_s(str, 255, "MainDlgProc(IDC_LoadDefaults): bwType: %d", (int)chParams->tunerParams.bwType);
+					OutputDebugString(str);
+#endif
 
-					//Samplerate
 					SampleRateIdx = 0;
-					//SampleRate = samplerates[SampleRateIdx].value;
+					deviceParams->devParams->fsFreq.fsHz = 6000000.0;
+					IFMode = sdrplay_api_IF_1_620;
+					chParams->tunerParams.ifType = IFMode;
 					ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_SAMPLERATE));
-					for (i = 0; i < (sizeof(samplerates) / sizeof(samplerates[0])); i++)
-					{
-						SR = samplerates[i].value;
-						_stprintf_s(str, 255, TEXT("%.2f"), SR);
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_SAMPLERATE), str);
-					}
+					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_SAMPLERATE), "2.0");
 					ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_SAMPLERATE), SampleRateIdx);
+					Edit_Enable(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 0);
 					SR = 2.0;
+
+					DecimationIdx = 0;
+					DecimateEnable = 0;
+					ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_DECIMATION));
+					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), "None");
+					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), "2");
+					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), "4");
+					ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), "8");
+					ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_DECIMATION), DecimationIdx);
+
+					// LNA gain reduction setup
+					LNAGainReduction = 0;
+					sprintf_s(LNAGainReductionTxt, 254, "%d", LNAGainReduction);
+					Edit_SetText(GetDlgItem(hwndDlg, IDC_LNAGRNO), LNAGainReductionTxt);
+					SendMessage(GetDlgItem(hwndDlg, IDC_LNASLIDER), TBM_SETPOS, (WPARAM)true, (LPARAM)LNAGainReduction);
 
 					//Gain Reduction
 					GainReduction = 50;
 					sprintf_s(GainReductionTxt, 254, "%d", GainReduction);
 					Edit_SetText(GetDlgItem(hwndDlg, IDC_GR), GainReductionTxt);
 					SendMessage(GetDlgItem(hwndDlg, IDC_GAINSLIDER), TBM_SETPOS, (WPARAM)true, (LPARAM)GainReduction);
+
+					sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", 84);
+					Edit_SetText(GetDlgItem(hwndDlg, IDC_TOTALGR), str);
+
 					//AGCSetpoint
 					AGCsetpoint = -30;
 					sprintf_s(AGCsetpointTxt, 254, "%d", AGCsetpoint);
 					Edit_SetText(GetDlgItem(hwndDlg, IDC_SETPOINT), AGCsetpointTxt);
+
 					//Frequency Offset
 					FqOffsetPPM = 0;
 					sprintf_s(FreqoffsetTxt, 254, "%.2f", FqOffsetPPM);
 					Edit_SetText(GetDlgItem(hwndDlg, IDC_PPM), FreqoffsetTxt);
+
 					//AGC
-					AGCEnabled = mir_sdr_AGC_5HZ;
-					SendMessage(GetDlgItem(hwndDlg, IDC_RSPAGC), BM_SETCHECK, (WPARAM)(1), 0);
+					AGCEnabled = true;
+					SendMessage(GetDlgItem(hwndDlg, IDC_RSPAGC), BM_SETCHECK, (WPARAM)(1), 1); // (WPARAM)(1) = true
 					Edit_Enable(GetDlgItem(hwndDlg, IDC_GR), 0);
 					Edit_Enable(GetDlgItem(hwndDlg, IDC_GAINSLIDER), 0);
 
 					//LOPLan
 					LOplan = LO120MHz;
 					LOplanAuto = true;
-					WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
+					//WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
 
 					DcCompensationMode = PERIODIC3;
 					TrackingPeriod = 32;
 					RefreshPeriodMemory = 2;
 					PostTunerDcCompensation = true;
 
-					// LNA Enable
-					//SendMessage(GetDlgItem(hwndDlg, IDC_LNAGR_SWITCH), BM_SETCHECK, BST_CHECKED, 0);
-					Edit_SetText(GetDlgItem(hwndDlg, IDC_LNAGR), "LNA GR 0 dB");
-					Edit_SetText(GetDlgItem(hwndDlg, IDC_LNASTATE), "LNA ON");
-					LNAEnable = true;
-					sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", GainReduction);
-					Edit_SetText(GetDlgItem(hwndDlg, IDC_TOTALGR), str);
-
-					if (Running)
-					{
-						ReinitAll();
-					}
+					ReinitAll();
+					UpdateSR();
 
 					// Station Lookup
 					stationLookup = false;
@@ -4855,322 +4840,55 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 			case IDC_IFBW:
 				if (GET_WM_COMMAND_CMD(wParam, lParam) == CBN_SELCHANGE)
 				{
+#ifdef DEBUG_ENABLE
+					OutputDebugString("IDC_IFBW");
+#endif
 					BandwidthIdx = ComboBox_GetCurSel(GET_WM_COMMAND_HWND(wParam, lParam));
 					Bandwidth = bandwidths[BandwidthIdx].bwType;
-					BW = (float)bandwidths[BandwidthIdx].BW;
-
+					chParams->tunerParams.bwType = Bandwidth;
 #ifdef DEBUG_ENABLE
-					_stprintf_s(str, 255, "BW: %f", BW);
+					_stprintf_s(str, 255, "MainDlgProc(IDC_IFBW): bwType: %d", (int)chParams->tunerParams.bwType);
 					OutputDebugString(str);
 #endif
-
-					//ZIF Mode selected
-
-					if (IFmodeIdx == 0)
-					{
-						//Populate Sample Rate Control With Appropriate Sample rates
-						ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_SAMPLERATE));
-						bool first = true;
-						double localSR;
-						for (i = 0; i < (sizeof(samplerates) / sizeof(samplerates[0])); i++)
-						{
-							localSR = samplerates[i].value + 0.06;		//Subtract small value as cannot use == with two doubles.
-							if (localSR > BW)
-							{
-								_stprintf_s(str, 255, TEXT("%.2f"), samplerates[i].value);
-								ComboBox_AddString(GetDlgItem(hwndDlg, IDC_SAMPLERATE), str);
-								if (first)
-								{
-									SampleRateIdx = FindSampleRateIdx(atof(str));
-									SR = samplerates[SampleRateIdx].value;
-									first = false;
-#ifdef DEBUG_ENABLE
-									OutputDebugString(str);
-#endif
-								}
-							}
-						}
-
-#ifdef DEBUG_ENABLE
-						sprintf_s(str, 255, "IDC_IFBW: BandwidthIdx: %d", BandwidthIdx);
-						OutputDebugString(str);
-						sprintf_s(str, 255, "IDC_IFBW: SampleRateIdx: %d", SampleRateIdx);
-						OutputDebugString(str);
-#endif
-
-						ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 0);
-
-						//Populate Decimate Control With Appropriate Sample rates
-						ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_DECIMATION));
-						_stprintf_s(str, 255, "None");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-						for (i = 1; i < (sizeof(Decimation) / sizeof(Decimation[0])); i++)
-						{
-							if (((samplerates[SampleRateIdx].value + 0.1) / Decimation[i].DecValue) > BW)
-							{
-								_stprintf_s(str, 255, TEXT("%d"), Decimation[i].DecValue);
-								ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-							}
-						}
-
-						if (BW > 1)
-						{
-							DecimationIdx = 0;
-							DecimateEnable = 0;
-						}
-						else if (BW > 0.31)
-						{
-							DecimationIdx = 1;
-							DecimateEnable = 1;
-						}
-						else if (BW > 0.21)
-						{
-							DecimationIdx = 2;
-							DecimateEnable = 1;
-						}
-						else
-						{
-							DecimationIdx = 3;
-							DecimateEnable = 1;
-						}
-
-						ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_DECIMATION), DecimationIdx);
-						if (DecimateEnable == 1 && DecimationIdx > 0)
-							SR = SR / Decimation[DecimationIdx].DecValue;
-
-						//Load defaults from Default Samplerates
-						/*
-						SampleRateDisplayIdx = 0;
-						ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_SAMPLERATE), SampleRateDisplayIdx);
-						SendMessage(GetDlgItem(hwndDlg, IDC_SAMPLERATE), CB_GETLBTEXT, 0, (LPARAM)SampleRateTxt);	//readback chosen sample rates and work out Idx
-						WantedSR = atof(SampleRateTxt);
-						SampleRateIdx = FindSampleRateIdx(WantedSR);
-						*/
-					}
-					else
-					{
-						// Low IF mode
-						if (Bandwidth == mir_sdr_BW_1_536)
-						{
-							IFMode = mir_sdr_IF_2_048;
-							ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_SAMPLERATE));
-							_stprintf_s(str, 255, TEXT("%.2f"), 8.192);
-							ComboBox_AddString(GetDlgItem(hwndDlg, IDC_SAMPLERATE), str);
-							ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 0);
-							SampleRateIdx = 6;
-							SR = 8.192;
-							//Populate Decimate Control With Appropriate Sample rates
-							ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_DECIMATION));
-							_stprintf_s(str, 255, "None");
-							ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-							_stprintf_s(str, 255, "2");
-							ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-							_stprintf_s(str, 255, "4");
-							ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-							DecimationIdx = 2;
-							ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_DECIMATION), DecimationIdx);
-							DecimateEnable = 0;
-						}
-						else
-						{
-							IFMode = mir_sdr_IF_0_450;
-							ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_SAMPLERATE));
-							_stprintf_s(str, 255, TEXT("%.2f"), 2.0);
-							ComboBox_AddString(GetDlgItem(hwndDlg, IDC_SAMPLERATE), str);
-							ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 0);
-							SampleRateIdx = 0;
-							SR = 2.0;
-							//Populate Decimate Control With Appropriate Sample rates
-							ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_DECIMATION));
-							_stprintf_s(str, 255, "None");
-							ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-							_stprintf_s(str, 255, "2");
-							ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-							_stprintf_s(str, 255, "4");
-							ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-							if (Bandwidth == mir_sdr_BW_0_600)
-								DecimationIdx = 1;
-							else
-								DecimationIdx = 2;
-							ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_DECIMATION), DecimationIdx);
-							DecimateEnable = 0;
-						}
-					}
-
-#ifdef DEBUG_ENABLE
-					sprintf_s(str, 255, "SampleRateIdx before callback: %d", SampleRateIdx);
-					OutputDebugString(str);
-#endif
-					WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
 
 					if (Running)
-					{
-						ReinitAll();
-						//mir_sdr_Reinit_fn(pZERO, SR, 0.0, Bandwidth, IFMode, mir_sdr_LO_Undefined, 0, pZERO, 1, pZERO, (mir_sdr_ReasonForReinitT)(mir_sdr_CHANGE_BW_TYPE | mir_sdr_CHANGE_IF_TYPE | mir_sdr_CHANGE_FS_FREQ));
-						//mir_sdr_DecimateControl_fn(DecimateEnable, Decimation[DecimationIdx].DecValue, 0);
-					}
+						sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_BwType, sdrplay_api_Update_Ext1_None);
 
-					return true;
 				}
 				break;
-			
+
 			case IDC_IFMODE:
 				if (GET_WM_COMMAND_CMD(wParam, lParam) == CBN_SELCHANGE)
 				{
+#ifdef DEBUG_ENABLE
+					OutputDebugString("IDC_IFMODE");
+#endif
 					IFmodeIdx = ComboBox_GetCurSel(GET_WM_COMMAND_HWND(wParam, lParam));
+
 					if (IFmodeIdx == 0)
 					{
-						//Add Filter Bandwidths to IFBW dialog Box
-						ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_IFBW));
-						_stprintf_s(str, 255, "200 kHz");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-						_stprintf_s(str, 255, "300 kHz");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-						_stprintf_s(str, 255, "600 kHz");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-						_stprintf_s(str, 255, "1.536 MHz");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-						_stprintf_s(str, 255, "5.000 MHz");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-						_stprintf_s(str, 255, "6.000 MHz");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-						_stprintf_s(str, 255, "7.000 MHz");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-						_stprintf_s(str, 255, "8.000 MHz");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);	
-
-						//Set IF Bandwidth to 200kHz as Default
-						BandwidthIdx = 0;
-						ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_IFBW), BandwidthIdx);
-						Bandwidth = bandwidths[BandwidthIdx].bwType;
-
-						//Set IF Mode to ZIF
-						IFMode = mir_sdr_IF_Zero;
-
-						//Set Samplerate for 200kHz filter default
-						SampleRateIdx = 0;
-						ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_SAMPLERATE));
-						for (i = 0; i < (sizeof(samplerates) / sizeof(samplerates[0])); i++)
-						{
-							SR = samplerates[i].value;
-							_stprintf_s(str, 255, TEXT("%.2f"), SR);
-							ComboBox_AddString(GetDlgItem(hwndDlg, IDC_SAMPLERATE), str);
-						}
-						ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 0);
-						SR = 2.0 / 8;
-
-						DecimationIdx = 3;
-						DecimateEnable = 1;
-						ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_DECIMATION));
-						_stprintf_s(str, 255, "None");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-						_stprintf_s(str, 255, "2");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-						_stprintf_s(str, 255, "4");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-						_stprintf_s(str, 255, "8");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-						ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_DECIMATION), DecimationIdx);
-
-						//Enable Sample Rate & Decimation Dialog Boxes
-						Edit_Enable(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 1);
-						Edit_Enable(GetDlgItem(hwndDlg, IDC_DECIMATION), 1);
-					}
-
-					if (IFmodeIdx == 1)
-					{
-						//Add filter Bandwidths for Low IF modes
-						ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_IFBW));
-						_stprintf_s(str, 255, "200 kHz");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-						_stprintf_s(str, 255, "300 kHz");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-						_stprintf_s(str, 255, "600 kHz");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);
-						_stprintf_s(str, 255, "1.536 MHz");						
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_IFBW), str);	
-
-						//Set IF Bandwidth to 200kHz as Default
-						BandwidthIdx = 0;
-						ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_IFBW), BandwidthIdx);
-						Bandwidth = bandwidths[BandwidthIdx].bwType;
-
-						//IF Mode
-						IFMode = mir_sdr_IF_0_450;
-
-						//Set Samplerate for 200kHz filter default
-						SampleRateIdx = 0;
-						ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_SAMPLERATE));
-						_stprintf_s(str, 255, TEXT("%.2f"), 2.0);
-						SR = (2.0 * 1e6) / 4;
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_SAMPLERATE), str);
-						ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 0);
-
-						ComboBox_ResetContent(GetDlgItem(hwndDlg, IDC_DECIMATION));
-						_stprintf_s(str, 255, "None");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-						_stprintf_s(str, 255, "2");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-						_stprintf_s(str, 255, "4");
-						ComboBox_AddString(GetDlgItem(hwndDlg, IDC_DECIMATION), str);
-						DecimationIdx = 2;
-						ComboBox_SetCurSel(GetDlgItem(hwndDlg, IDC_DECIMATION), DecimationIdx);
-						DecimateEnable = 0;
-
-						//Disable Sample Rate Display & Decimation Dialog Boxes
-						Edit_Enable(GetDlgItem(hwndDlg, IDC_SAMPLERATE), 0);
-						Edit_Enable(GetDlgItem(hwndDlg, IDC_DECIMATION), 0);
-					}
-					WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
-					return true;
-				}
-				break;
-
-			case IDC_LNAGR_SWITCH:
-				if (GET_WM_COMMAND_CMD(wParam, lParam) == BN_CLICKED)
-				{
-					if (Button_GetCheck(GET_WM_COMMAND_HWND(wParam, lParam)) == BST_CHECKED)
-					{
-						LNAEnable = true;
-                        if (AGCEnabled == mir_sdr_AGC_DISABLE)
-                        {
-                            mir_sdr_GetGrByFreq_fn(Frequency, (mir_sdr_BandT *)&FreqBand, (int *)&GainReduction, LNAEnable, &SystemGainReduction, mir_sdr_USE_SET_GR_ALT_MODE);
-                        }
-						Edit_SetText(GetDlgItem(hwndDlg, IDC_LNAGR), "LNA GR 0 dB");
-						Edit_SetText(GetDlgItem(hwndDlg, IDC_LNASTATE), "LNA ON");
-						//SendMessage(GetDlgItem(hwndDlg, IDC_GR_S), UDM_SETRANGE, (WPARAM)true, (LPARAM)MAKELONG(19, 78));
-						SendMessage(GetDlgItem(hwndDlg, IDC_GAINSLIDER), TBM_SETRANGEMIN, (WPARAM)true, (LPARAM)19);
-						SendMessage(GetDlgItem(hwndDlg, IDC_GAINSLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)78);
+#ifdef DEBUG_ENABLE
+						OutputDebugString("IFmodeIdx: 0");
+#endif
+						IFMode = sdrplay_api_IF_Zero;
+						chParams->tunerParams.ifType = IFMode;
 					}
 					else
 					{
-						LNAEnable = false;
-                        if (AGCEnabled == mir_sdr_AGC_DISABLE)
-                        {
-                            mir_sdr_GetGrByFreq_fn(Frequency, (mir_sdr_BandT *)&FreqBand, (int *)&GainReduction, LNAEnable, &SystemGainReduction, mir_sdr_USE_SET_GR_ALT_MODE);
-                        }
-						sprintf_s(str, sizeof(str), "%s %d %s", "LNA GR", band_LNAgain[FreqBand], "dB");
-						Edit_SetText(GetDlgItem(hwndDlg, IDC_LNAGR), str);
-						Edit_SetText(GetDlgItem(hwndDlg, IDC_LNASTATE), "LNA OFF");
-						//SendMessage(GetDlgItem(hwndDlg, IDC_GR_S), UDM_SETRANGE, (WPARAM)true, (LPARAM)MAKELONG(band_MinGR[FreqBand], 78));
-						SendMessage(GetDlgItem(hwndDlg, IDC_GAINSLIDER), TBM_SETRANGEMIN, (WPARAM)true, (LPARAM)band_MinGR[FreqBand]);
-						SendMessage(GetDlgItem(hwndDlg, IDC_GAINSLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)78);
+#ifdef DEBUG_ENABLE
+						OutputDebugString("IFmodeIdx: 1");
+#endif
+						IFMode = sdrplay_api_IF_1_620;
+						chParams->tunerParams.ifType = IFMode;
 					}
-               
-					if (AGCEnabled == mir_sdr_AGC_DISABLE) 
-					{
-						SendMessage(GetDlgItem(hwndDlg, IDC_GAINSLIDER), TBM_SETPOS, (WPARAM)true, (LPARAM)GainReduction);
-						sprintf_s(str, sizeof(str), "IF Gain Reduction %d dB", GainReduction);
-						Edit_SetText(GetDlgItem(hwndDlg, IDC_IFGR), str);
-						sprintf_s(GainReductionTxt, 254, "%d", GainReduction);
-						Edit_SetText(GetDlgItem(hwndDlg, IDC_GR), GainReductionTxt);
-						sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
-						Edit_SetText(GetDlgItem(hwndDlg, IDC_TOTALGR), str);
-					}
-					else
-					{
-						mir_sdr_AgcControl_fn(AGCEnabled, AGCsetpoint, 0, 0, 0, 0, LNAEnable);
-					}
+
+					Reset_SAMPLERATE(hwndDlg);
+					Reset_DECIMATION(hwndDlg);
+					Reset_IFBW();
+
+					ReinitAll();
+					UpdateSR();
+
 					return true;
 				}
 				break;
@@ -5337,6 +5055,7 @@ static INT_PTR CALLBACK AdvancedDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
             if (Running)
             {
                ReinitAll();
+			   UpdateSR();
             }
          }
          else
@@ -5345,7 +5064,10 @@ static INT_PTR CALLBACK AdvancedDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
             {
                DcCompensationMode = DcCompensationModeLCL;
                RefreshPeriodMemory = RefreshPeriodMemoryLCL;
-               mir_sdr_SetDcMode_fn(DcCompensationMode, 0);
+			   chParams->tunerParams.dcOffsetTuner.dcCal = (unsigned char)DcCompensationMode;
+			   chParams->tunerParams.dcOffsetTuner.speedUp = 0;
+			   if (Running)
+				   sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_DcOffset, sdrplay_api_Update_Ext1_None);
             }
          }
 			return true;
@@ -5519,6 +5241,7 @@ static INT_PTR CALLBACK ProfilesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
 	int _BandwidthIdx = 0;
 	int _GainReduction = 0;
 	bool locAGC;
+	bool rfret;
 
 //	HBITMAP hbitmap1, hbitmap2;
 
@@ -5878,7 +5601,7 @@ static INT_PTR CALLBACK ProfilesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
 					hFile = CreateFile(szFileName, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 
 					// Read file format version number
-					ReadFile(hFile, &readvers, sizeof(readvers), &nBytesWritten, NULL);
+					rfret = ReadFile(hFile, &readvers, sizeof(readvers), &nBytesWritten, NULL);
 
 					if (strcmp(readvers, vers) != 0) {
 						CloseHandle(hFile);
@@ -5888,12 +5611,12 @@ static INT_PTR CALLBACK ProfilesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
 					else
 					{
 						// IF Mode
-						ReadFile(hFile, &IFMode, sizeof(IFMode), &nBytesWritten, NULL);
-						ReadFile(hFile, &IFmodeIdx, sizeof(IFmodeIdx), &nBytesWritten, NULL);
+						rfret = ReadFile(hFile, &IFMode, sizeof(IFMode), &nBytesWritten, NULL);
+						rfret = ReadFile(hFile, &IFmodeIdx, sizeof(IFmodeIdx), &nBytesWritten, NULL);
 
 						// IF Bandwidth
-						ReadFile(hFile, &Bandwidth, sizeof(Bandwidth), &nBytesWritten, NULL);
-						ReadFile(hFile, &_BandwidthIdx, sizeof(_BandwidthIdx), &nBytesWritten, NULL);
+						rfret = ReadFile(hFile, &Bandwidth, sizeof(Bandwidth), &nBytesWritten, NULL);
+						rfret = ReadFile(hFile, &_BandwidthIdx, sizeof(_BandwidthIdx), &nBytesWritten, NULL);
 
 						BandwidthIdx = _BandwidthIdx;
 						ComboBox_SetCurSel(GetDlgItem(h_dialog, IDC_IFMODE), IFmodeIdx);
@@ -5920,37 +5643,33 @@ static INT_PTR CALLBACK ProfilesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
 						ComboBox_SetCurSel(GetDlgItem(h_dialog, IDC_IFBW), BandwidthIdx);
 
 						// Sample Rate
-						ReadFile(hFile, &SampleRateIdx, sizeof(SampleRateIdx), &nBytesWritten, NULL);
+						rfret = ReadFile(hFile, &SampleRateIdx, sizeof(SampleRateIdx), &nBytesWritten, NULL);
 						ComboBox_SetCurSel(GetDlgItem(h_dialog, IDC_SAMPLERATE), SampleRateIdx);
 
 						// Decimation
-						ReadFile(hFile, &DecimationIdx, sizeof(DecimationIdx), &nBytesWritten, NULL);
+						rfret = ReadFile(hFile, &DecimationIdx, sizeof(DecimationIdx), &nBytesWritten, NULL);
 						ComboBox_SetCurSel(GetDlgItem(h_dialog, IDC_DECIMATION), DecimationIdx);
 
 						// Gain Reduction
-						ReadFile(hFile, &_GainReduction, sizeof(_GainReduction), &nBytesWritten, NULL);
+						rfret = ReadFile(hFile, &_GainReduction, sizeof(_GainReduction), &nBytesWritten, NULL);
 						GainReduction = _GainReduction;
 						sprintf_s(GainReductionTxt, 254, "%d", GainReduction);
 						Edit_SetText(GetDlgItem(h_dialog, IDC_GR), GainReductionTxt);
 						SendMessage(GetDlgItem(h_dialog, IDC_GAINSLIDER), TBM_SETPOS, (WPARAM)true, (LPARAM)GainReduction);
 
 						// AGC Setpoint
-						ReadFile(hFile, &AGCsetpoint, sizeof(AGCsetpoint), &nBytesWritten, NULL);
+						rfret = ReadFile(hFile, &AGCsetpoint, sizeof(AGCsetpoint), &nBytesWritten, NULL);
 						sprintf_s(AGCsetpointTxt, 254, "%d", AGCsetpoint);
 						Edit_SetText(GetDlgItem(h_dialog, IDC_SETPOINT), AGCsetpointTxt);
 
 						// Frequency Offset
-						ReadFile(hFile, &FqOffsetPPM, sizeof(FqOffsetPPM), &nBytesWritten, NULL);
+						rfret = ReadFile(hFile, &FqOffsetPPM, sizeof(FqOffsetPPM), &nBytesWritten, NULL);
 						sprintf_s(FreqoffsetTxt, 254, "%.2f", FqOffsetPPM);
 						Edit_SetText(GetDlgItem(h_dialog, IDC_PPM), FreqoffsetTxt);
 
 						// AGC Enable
-						ReadFile(hFile, &locAGC, sizeof(locAGC), &nBytesWritten, NULL);
-						AGCEnabled = mir_sdr_AGC_5HZ;
-						if (!locAGC)
-							AGCEnabled = mir_sdr_AGC_DISABLE;
-
-						if (AGCEnabled != mir_sdr_AGC_DISABLE)
+						rfret = ReadFile(hFile, &locAGC, sizeof(locAGC), &nBytesWritten, NULL);
+						if (AGCEnabled)
 						{
 							SendMessage(GetDlgItem(h_dialog, IDC_RSPAGC), BM_SETCHECK, (WPARAM)(1), 0);
 							Edit_Enable(GetDlgItem(h_dialog, IDC_GR), 0);
@@ -5964,8 +5683,8 @@ static INT_PTR CALLBACK ProfilesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
 						}
 
 						// LO Plan
-						ReadFile(hFile, &LOplan, sizeof(LOplan), &nBytesWritten, NULL);
-						ReadFile(hFile, &LOplanAuto, sizeof(LOplanAuto), &nBytesWritten, NULL);
+						rfret = ReadFile(hFile, &LOplan, sizeof(LOplan), &nBytesWritten, NULL);
+						rfret = ReadFile(hFile, &LOplanAuto, sizeof(LOplanAuto), &nBytesWritten, NULL);
 						if (LOplanAuto)
 						{
 							SendMessage(GetDlgItem(h_dialog, IDC_LOAUTO), BM_SETCHECK, BST_CHECKED, 0);
@@ -5996,10 +5715,11 @@ static INT_PTR CALLBACK ProfilesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
 
 						WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
 
-                  if (Running)
-                  {
-                     ReinitAll();
-                  }
+						if (Running)
+						{
+							ReinitAll();
+							UpdateSR();
+						}
 
 						// DC compensation mode
 						ReadFile(hFile, &DcCompensationMode, sizeof(DcCompensationMode), &nBytesWritten, NULL);
@@ -6030,6 +5750,7 @@ static INT_PTR CALLBACK ProfilesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
 				TCHAR writevers[5] = TEXT("0002");
 				int _BandwidthIdx = BandwidthIdx;
 				int _GainReduction = GainReduction;
+				int _LNAGainReduction = LNAGainReduction;
 				ofn.lStructSize = sizeof(OPENFILENAME);
 				ofn.hwndOwner = h_ProfilesDialog;
 				ofn.lpstrFilter = _T("RSP Profiles (*.rsp)\0*.rsp\0\0");
@@ -6053,17 +5774,14 @@ static INT_PTR CALLBACK ProfilesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
 					WriteFile(hFile, &_GainReduction, sizeof(_GainReduction), &nBytesWritten, NULL);					// Gain Reduction
 					WriteFile(hFile, &AGCsetpoint, sizeof(AGCsetpoint), &nBytesWritten, NULL);							// AGC Setpoint
 					WriteFile(hFile, &FqOffsetPPM, sizeof(FqOffsetPPM), &nBytesWritten, NULL);							// Frequency Offset
-					locAGC = true;
-					if (AGCEnabled == mir_sdr_AGC_DISABLE)
-						locAGC = false;
-					WriteFile(hFile, &locAGC, sizeof(locAGC), &nBytesWritten, NULL);									// AGC Enable
+					WriteFile(hFile, &AGCEnabled, sizeof(AGCEnabled), &nBytesWritten, NULL);									// AGC Enable
 					WriteFile(hFile, &LOplan, sizeof(LOplan), &nBytesWritten, NULL);									// LO plan
 					WriteFile(hFile, &LOplanAuto, sizeof(LOplanAuto), &nBytesWritten, NULL);							// LO plan Auto
 					WriteFile(hFile, &DcCompensationMode, sizeof(DcCompensationMode), &nBytesWritten, NULL);			// DC compensation mode
 					WriteFile(hFile, &TrackingPeriod, sizeof(TrackingPeriod), &nBytesWritten, NULL);					// Tracking period
 					WriteFile(hFile, &RefreshPeriodMemory, sizeof(RefreshPeriodMemory), &nBytesWritten, NULL);			// Refresh Period
 					WriteFile(hFile, &PostTunerDcCompensation, sizeof(PostTunerDcCompensation), &nBytesWritten, NULL);	// Post Tuner DC compensation
-					WriteFile(hFile, &LNAEnable, sizeof(LNAEnable), &nBytesWritten, NULL);								// LNA Enable
+					WriteFile(hFile, &_LNAGainReduction, sizeof(_LNAGainReduction), &nBytesWritten, NULL);				// LNA gain reduction value
 
 					CloseHandle(hFile);
 
@@ -6205,10 +5923,7 @@ void LoadProfile(int profile)
 
 		// AGC Enable
 		ReadFile(hFile, &locAGC, sizeof(locAGC), &nBytesWritten, NULL);
-		AGCEnabled = mir_sdr_AGC_5HZ;
-		if (!locAGC)
-			AGCEnabled = mir_sdr_AGC_DISABLE;
-		if (AGCEnabled != mir_sdr_AGC_DISABLE)
+		if (AGCEnabled)
 		{
 			SendMessage(GetDlgItem(h_dialog, IDC_RSPAGC), BM_SETCHECK, (WPARAM)(1), 0);
 			Edit_Enable(GetDlgItem(h_dialog, IDC_GR), 0);
@@ -6254,10 +5969,11 @@ void LoadProfile(int profile)
 
 		WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
 
-      if (Running)
-      {
-         ReinitAll();
-      }
+		if (Running)
+		{
+			ReinitAll();
+			UpdateSR();
+		}
 
 		// DC compensation mode
 		ReadFile(hFile, &DcCompensationMode, sizeof(DcCompensationMode), &nBytesWritten, NULL);
@@ -6273,28 +5989,18 @@ void LoadProfile(int profile)
 
 		// LNA Enable
 		ReadFile(hFile, &LNAEN, sizeof(LNAEN), &nBytesWritten, NULL);
-		if (LNAEN == 1)
-		{
-         LNAEnable = true;
-         mir_sdr_GetGrByFreq_fn(Frequency, (mir_sdr_BandT *)NULL, (int *)&GainReduction, LNAEnable, &SystemGainReduction, mir_sdr_USE_SET_GR_ALT_MODE);
-         //SendMessage(GetDlgItem(h_dialog, IDC_LNAGR_SWITCH), BM_SETCHECK, BST_CHECKED, 0);
-			Edit_SetText(GetDlgItem(h_dialog, IDC_LNAGR), "LNA GR 0 dB");
-			Edit_SetText(GetDlgItem(h_dialog, IDC_LNASTATE), "LNA ON");
-			sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
-			Edit_SetText(GetDlgItem(h_dialog, IDC_TOTALGR), str);
-		}
-		else
-		{
-         LNAEnable = false;
-         mir_sdr_GetGrByFreq_fn(Frequency, (mir_sdr_BandT *)NULL, (int *)&GainReduction, LNAEnable, &SystemGainReduction, mir_sdr_USE_SET_GR_ALT_MODE);
-         //SendMessage(GetDlgItem(h_dialog, IDC_LNAGR_SWITCH), BM_SETCHECK, BST_UNCHECKED, 0);
-			Edit_SetText(GetDlgItem(h_dialog, IDC_LNAGR), "LNA GR 24 dB");
-			Edit_SetText(GetDlgItem(h_dialog, IDC_LNASTATE), "LNA OFF");
-			sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
-			Edit_SetText(GetDlgItem(h_dialog, IDC_TOTALGR), str);
-		}
+		sprintf_s(str, sizeof(str), "Total System Gain Reduction %d dB", SystemGainReduction);
+		Edit_SetText(GetDlgItem(h_dialog, IDC_TOTALGR), str);
 
 		CloseHandle(hFile);
+
+		WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
+
+		if (Running)
+		{
+			ReinitAll();
+			UpdateSR();
+		}
 
 		_tcscpy_s(copiedfn, filename);
 		PathRemoveExtension(copiedfn);
@@ -6682,4 +6388,329 @@ static INT_PTR CALLBACK StationConfigDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wPa
 		}
 	}
 	return false;
+}
+
+void ReinitAll(void)
+{
+#ifdef DEBUG_ENABLE
+	OutputDebugString("ReinitAll");
+#endif
+
+	chParams->tunerParams.gain.gRdB = GainReduction;
+	chParams->tunerParams.gain.LNAstate = (unsigned char)LNAGainReduction;
+
+	if (AGCEnabled)
+		chParams->ctrlParams.agc.enable = sdrplay_api_AGC_5HZ;
+	else
+		chParams->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
+
+	if (Running)
+	{
+		WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
+	}
+	else
+	{
+#ifdef DEBUG_ENABLE
+		OutputDebugString("Initialise");
+#endif
+		chParams->tunerParams.rfFreq.rfHz = Frequency * 1e6;
+		sdrplay_api_Init_fn(chosenDev->dev, &cbFns, NULL);
+		Running = true;
+		WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
+	}
+#ifdef DEBUG_ENABLE
+	OutputDebugString("ReinitAll finished");
+#endif
+}
+
+void ApplyDecimation(int decValue)
+{
+#ifdef DEBUG_ENABLE
+	char str[255];
+	OutputDebugString("ApplyDecimation");
+#endif
+	if (decValue < 2)
+	{
+#ifdef DEBUG_ENABLE
+		OutputDebugString("Decimation disabled");
+#endif
+		DecimateEnable = 0;
+		chParams->ctrlParams.decimation.decimationFactor = 1;
+	}
+	else
+	{
+#ifdef DEBUG_ENABLE
+		OutputDebugString("Decimation Enabled");
+#endif
+		DecimateEnable = 1;
+		chParams->ctrlParams.decimation.decimationFactor = (unsigned char)decValue;
+	}
+
+	chParams->ctrlParams.decimation.enable = (unsigned char)DecimateEnable;
+	chParams->ctrlParams.decimation.wideBandSignal = 1;
+
+#ifdef DEBUG_ENABLE
+	_stprintf_s(str, 255, "ApplyDecimation: %d", decValue);
+	OutputDebugString(str);
+#endif
+
+	WinradCallBack(-1, WINRAD_SRCHANGE, 0, NULL);
+}
+
+void Update_IFBW(void)
+{
+#ifdef DEBUG_ENABLE
+	OutputDebugString("Update_IFBW");
+#endif
+	HWND ifbwMenu = GetDlgItem(h_dialog, IDC_IFBW);
+	char str[255];
+	int bwArraySize = 4;
+
+	ComboBox_ResetContent(ifbwMenu);
+	_stprintf_s(str, 255, "200 kHz");
+	ComboBox_AddString(ifbwMenu, str);
+	_stprintf_s(str, 255, "300 kHz");
+	ComboBox_AddString(ifbwMenu, str);
+	_stprintf_s(str, 255, "600 kHz");
+	ComboBox_AddString(ifbwMenu, str);
+	_stprintf_s(str, 255, "1.536 MHz");
+	ComboBox_AddString(ifbwMenu, str);
+
+	if (IFmodeIdx == 0)
+	{
+		bwArraySize = 8;
+		// Zero IF
+		_stprintf_s(str, 255, "5.000 MHz");
+		ComboBox_AddString(ifbwMenu, str);
+		_stprintf_s(str, 255, "6.000 MHz");
+		ComboBox_AddString(ifbwMenu, str);
+		_stprintf_s(str, 255, "7.000 MHz");
+		ComboBox_AddString(ifbwMenu, str);
+		_stprintf_s(str, 255, "8.000 MHz");
+		ComboBox_AddString(ifbwMenu, str);
+	}
+
+	int bot;
+	double _sr;
+	if (IFmodeIdx == 0)
+	{
+		_sr = samplerates[SampleRateIdx].value;
+	}
+	else
+	{
+		_sr = 2.0;
+	}
+	int _dec = Decimation[DecimationIdx].DecValue;
+	if (_dec < 1) _dec = 1;
+
+	for (bot = (bwArraySize - 1); bot >= 0; bot--)
+	{
+		if ((_sr / _dec) >= bandwidths[bot].BW)
+		{
+#ifdef DEBUG_ENABLE
+			_stprintf_s(str, 255, "Update_IFBW: bot: %d, _sr: %f, _dec: %d, bw: %f", bot, _sr, _dec, bandwidths[bot].BW);
+			OutputDebugString(str);
+#endif
+			break;
+		}
+		else
+		{
+#ifdef DEBUG_ENABLE
+			_stprintf_s(str, 255, "Update_IFBW: remove %d", bot);
+			OutputDebugString(str);
+#endif
+			ComboBox_DeleteString(ifbwMenu, bot);
+		}
+	}
+
+	ComboBox_SetCurSel(ifbwMenu, bot);
+	BandwidthIdx = bot;
+	Bandwidth = bandwidths[BandwidthIdx].bwType;
+	chParams->tunerParams.bwType = Bandwidth;
+#ifdef DEBUG_ENABLE
+	_stprintf_s(str, 255, "Update_IFBW: bwType: %d", (int)chParams->tunerParams.bwType);
+	OutputDebugString(str);
+#endif
+}
+
+void Reset_SAMPLERATE(HWND hwndDlg)
+{
+#ifdef DEBUG_ENABLE
+	OutputDebugString("Reset_SAMPLERATE");
+#endif
+	char str[255];
+	HWND srMenu = GetDlgItem(hwndDlg, IDC_SAMPLERATE);
+
+	if (SampleRateIdx < 0 || SampleRateIdx > 8)
+	{
+		SampleRateIdx = 0;
+	}
+
+	Edit_Enable(srMenu, 1);
+	ComboBox_ResetContent(srMenu);
+	_stprintf_s(str, 255, "2.0");
+	ComboBox_AddString(srMenu, str);
+
+	if (IFmodeIdx == 0)
+	{
+		Edit_Enable(srMenu, 1);
+		_stprintf_s(str, 255, "3.0");
+		ComboBox_AddString(srMenu, str);
+		_stprintf_s(str, 255, "4.0");
+		ComboBox_AddString(srMenu, str);
+		_stprintf_s(str, 255, "5.0");
+		ComboBox_AddString(srMenu, str);
+		_stprintf_s(str, 255, "6.0");
+		ComboBox_AddString(srMenu, str);
+		_stprintf_s(str, 255, "7.0");
+		ComboBox_AddString(srMenu, str);
+		_stprintf_s(str, 255, "8.0");
+		ComboBox_AddString(srMenu, str);
+		_stprintf_s(str, 255, "9.0");
+		ComboBox_AddString(srMenu, str);
+		_stprintf_s(str, 255, "10.0");
+		ComboBox_AddString(srMenu, str);
+	}
+	else
+	{
+		Edit_Enable(srMenu, 0);
+	}
+	ComboBox_SetCurSel(srMenu, SampleRateIdx);
+
+	if (IFmodeIdx == 0)
+	{
+		deviceParams->devParams->fsFreq.fsHz = samplerates[SampleRateIdx].value * 1e6;
+	}
+	else
+	{
+		deviceParams->devParams->fsFreq.fsHz = 6000000.0;
+		SampleRateIdx = 0; // 2.0 MHz
+	}
+#ifdef DEBUG_ENABLE
+	_stprintf_s(str, 255, "Reset_SAMPLERATE: %f", deviceParams->devParams->fsFreq.fsHz);
+	OutputDebugString(str);
+#endif
+}
+
+void Reset_DECIMATION(HWND hwndDlg)
+{
+#ifdef DEBUG_ENABLE
+	OutputDebugString("Reset_DECIMATION");
+#endif
+	char str[255];
+	HWND decMenu = GetDlgItem(hwndDlg, IDC_DECIMATION);
+
+	DecimationIdx = 0;
+
+	ComboBox_ResetContent(decMenu);
+	_stprintf_s(str, 255, "None");
+	ComboBox_AddString(decMenu, str);
+	_stprintf_s(str, 255, "2");
+	ComboBox_AddString(decMenu, str);
+	_stprintf_s(str, 255, "4");
+	ComboBox_AddString(decMenu, str);
+	_stprintf_s(str, 255, "8");
+	ComboBox_AddString(decMenu, str);
+
+	if (IFmodeIdx == 0 && (SampleRateIdx >= 2))
+	{
+		_stprintf_s(str, 255, "16");
+		ComboBox_AddString(decMenu, str);
+	}
+
+	if (IFmodeIdx == 0 && (SampleRateIdx >= 6))
+	{
+		_stprintf_s(str, 255, "32");
+		ComboBox_AddString(decMenu, str);
+	}
+
+	ComboBox_SetCurSel(decMenu, DecimationIdx);
+
+	chParams->ctrlParams.decimation.enable = 0;
+	chParams->ctrlParams.decimation.decimationFactor = 1;
+	chParams->ctrlParams.decimation.wideBandSignal = 1;
+#ifdef DEBUG_ENABLE
+	OutputDebugString("Reset_DECIMATION: 1");
+#endif
+}
+
+void Reset_IFBW()
+{
+#ifdef DEBUG_ENABLE
+	OutputDebugString("Reset_IFBW");
+#endif
+	char str[255];
+	HWND ifbwMenu = GetDlgItem(h_dialog, IDC_IFBW);
+
+	ComboBox_ResetContent(ifbwMenu);
+	_stprintf_s(str, 255, "200 kHz");
+	ComboBox_AddString(ifbwMenu, str);
+	_stprintf_s(str, 255, "300 kHz");
+	ComboBox_AddString(ifbwMenu, str);
+	_stprintf_s(str, 255, "600 kHz");
+	ComboBox_AddString(ifbwMenu, str);
+	_stprintf_s(str, 255, "1.536 MHz");
+	ComboBox_AddString(ifbwMenu, str);
+
+	if (IFmodeIdx == 0)
+	{
+		// Zero IF
+		_stprintf_s(str, 255, "5.000 MHz");
+		ComboBox_AddString(ifbwMenu, str);
+		_stprintf_s(str, 255, "6.000 MHz");
+		ComboBox_AddString(ifbwMenu, str);
+		_stprintf_s(str, 255, "7.000 MHz");
+		ComboBox_AddString(ifbwMenu, str);
+		_stprintf_s(str, 255, "8.000 MHz");
+		ComboBox_AddString(ifbwMenu, str);
+	}
+
+	BandwidthIdx = 3; // 1536 kHz default BW
+
+	ComboBox_SetCurSel(ifbwMenu, BandwidthIdx);
+
+	Bandwidth = bandwidths[BandwidthIdx].bwType;
+	chParams->tunerParams.bwType = Bandwidth;
+
+#ifdef DEBUG_ENABLE
+	_stprintf_s(str, 255, "Reset_IFBW: bwType: %d", (int)chParams->tunerParams.bwType);
+	OutputDebugString(str);
+#endif
+//	if (Running)
+//		sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_BwType, sdrplay_api_Update_Ext1_None);
+}
+
+void UpdateSR(void)
+{
+#ifdef DEBUG_ENABLE
+	OutputDebugString("UpdateSR");
+#endif
+	char str[255];
+	long SR = (long)(2.0 * 1e6);
+
+	if (IFmodeIdx == 1)
+	{
+		if (DecimateEnable == 1 && (DecimationIdx > 0))
+		{
+			SR = SR / Decimation[DecimationIdx].DecValue;
+		}
+	}
+	else
+	{
+		SR = (long)(samplerates[SampleRateIdx].value * 1e6);
+		if (DecimateEnable == 1 && (DecimationIdx > 0))
+		{
+			SR = SR / Decimation[DecimationIdx].DecValue;
+		}
+	}
+#ifdef DEBUG_ENABLE
+	sprintf_s(str, 255, "SR: %d", SR);
+	OutputDebugString(str);
+#endif
+#ifdef DEBUG_ENABLE
+	_stprintf_s(str, 255, "UpdateSR: Bandwidth: %d", (int)Bandwidth);
+	OutputDebugString(str);
+#endif
+	sprintf_s(str, sizeof(str), "%.2f MHz", (SR / 1e6));
+	Edit_SetText(GetDlgItem(h_dialog, IDC_FINALSR), str);
 }

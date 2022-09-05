@@ -1,8 +1,9 @@
 
 /* *******************************************************************************/
 /*					EXTIO Plugin Interface for SDRplay RSPduo					 */
-/*									V1.2 build 1125								 */
-/* Version 1.2 supports API 3.06                                                 */
+/*									V1.4 build 0902								 */
+/* Version 1.4 built against API 3.11											 */
+/* Version 1.2 built against API 3.06                                            */
 /*********************************************************************************/
 
 #include <WinSock2.h>
@@ -35,10 +36,10 @@
 using namespace std;
 
 // main debug control - check output with debugview
-//#define DEBUG_ENABLE
+#define DEBUG_ENABLE
 
 // hardware debug output (watch with debugview)
-#define RSP_DEBUG 0
+#define RSP_DEBUG 1
 // station lookup debug - output to station control panel
 //#define DEBUG_STATION
 
@@ -1873,7 +1874,7 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 
 	// We have a device at this point
 #ifdef DEBUG_ENABLE
-	sdrplay_api_DebugEnable_fn(devices[chosenDevice].dev, 1);
+	sdrplay_api_DebugEnable_fn(devices[chosenDevice].dev, (sdrplay_api_DbgLvl_t)RSP_DEBUG);
 #endif
 
 	err = sdrplay_api_GetDeviceParams_fn(chosenDev->dev, &deviceParams);
@@ -5211,7 +5212,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 						{
 							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
 						}
-						sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, chParams->rspDuoTunerParams.tuner1AmPortSel);
+						sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, sdrplay_api_RspDuo_AMPORT_2);
 					}
 					else if (TunerIdx == 1 && chosenDev->tuner != sdrplay_api_Tuner_B) // Tuner 2
 					{
@@ -5225,7 +5226,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 						{
 							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
 						}
-						sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, chParams->rspDuoTunerParams.tuner1AmPortSel);
+						sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, sdrplay_api_RspDuo_AMPORT_2);
 					}
 					return true;
 				}
@@ -7410,30 +7411,47 @@ void Update_IFBW(void)
 		ComboBox_AddString(ifbwMenu, str);
 	}
 
-	for (BandwidthIdx = 0; BandwidthIdx < bwArraySize; BandwidthIdx++)
+	int bot;
+	double _sr;
+	if (IFmodeIdx == 0)
 	{
-		if ((samplerates[SampleRateIdx].value / Decimation[DecimationIdx].DecValue)  < bandwidths[BandwidthIdx].BW)
+		_sr = samplerates[SampleRateIdx].value;
+	}
+	else
+	{
+		_sr = 2.0;
+	}
+	int _dec = Decimation[DecimationIdx].DecValue;
+	if (_dec < 1) _dec = 1;
+
+	for (bot = (bwArraySize - 1); bot >= 0; bot--)
+	{
+		if ((_sr / _dec) >= bandwidths[bot].BW)
 		{
-			BandwidthIdx--;
-			if (BandwidthIdx < (bwArraySize - 1))
-			{
-				for (int i = (bwArraySize - 1); i > BandwidthIdx; i--)
-				{
-					ComboBox_DeleteString(ifbwMenu, i);
-				}
-			}
+#ifdef DEBUG_ENABLE
+			_stprintf_s(str, 255, "Update_IFBW: bot: %d, _sr: %f, _dec: %d, bw: %f", bot, _sr, _dec, bandwidths[bot].BW);
+			OutputDebugString(str);
+#endif
 			break;
+		}
+		else
+		{
+#ifdef DEBUG_ENABLE
+			_stprintf_s(str, 255, "Update_IFBW: remove %d", bot);
+			OutputDebugString(str);
+#endif
+			ComboBox_DeleteString(ifbwMenu, bot);
 		}
 	}
 
-	if (BandwidthIdx >= bwArraySize)
-		BandwidthIdx = bwArraySize - 1;
-
-	ComboBox_SetCurSel(ifbwMenu, BandwidthIdx);
+	ComboBox_SetCurSel(ifbwMenu, bot);
+	BandwidthIdx = bot;
 	Bandwidth = bandwidths[BandwidthIdx].bwType;
 	chParams->tunerParams.bwType = Bandwidth;
-	if (Running)
-		sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_BwType, sdrplay_api_Update_Ext1_None);
+#ifdef DEBUG_ENABLE
+	_stprintf_s(str, 255, "Update_IFBW: bwType: %d", (int)chParams->tunerParams.bwType);
+	OutputDebugString(str);
+#endif
 }
 
 void Reset_SAMPLERATE(HWND hwndDlg)
@@ -7499,6 +7517,7 @@ void Reset_SAMPLERATE(HWND hwndDlg)
 				chosenDev->rspDuoSampleFreq = 6000000.0;
 				deviceParams->devParams->fsFreq.fsHz = 6000000.0;
 			}
+			SampleRateIdx = 0; // 2.0 MHz
 		}
 	}
 }
@@ -7574,9 +7593,18 @@ void Reset_IFBW()
 		_stprintf_s(str, 255, "8.000 MHz");
 		ComboBox_AddString(ifbwMenu, str);
 	}
+
+	BandwidthIdx = 3; // 1536 kHz default BW
+
 	ComboBox_SetCurSel(ifbwMenu, BandwidthIdx);
 
-	chParams->tunerParams.bwType = sdrplay_api_BW_1_536;
+	Bandwidth = bandwidths[BandwidthIdx].bwType;
+	chParams->tunerParams.bwType = Bandwidth;
+
+#ifdef DEBUG_ENABLE
+	_stprintf_s(str, 255, "Reset_IFBW: bwType: %d", (int)chParams->tunerParams.bwType);
+	OutputDebugString(str);
+#endif
 }
 
 void UpdateSR(void)

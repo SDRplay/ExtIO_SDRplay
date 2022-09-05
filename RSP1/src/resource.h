@@ -33,9 +33,6 @@
 #define IDC_Advanced                            40023
 #define IDC_LoadDefaults                        40025
 #define IDC_EXIT                                40026
-#define IDC_LNASTATE                            40027
-#define IDC_LNAGR                               40028
-#define IDC_IFGR                                40029
 #define IDC_SAMPLERATE                          40032
 #define IDC_LoadProfile                         40033
 #define IDC_SaveProfile                         40034
@@ -92,7 +89,6 @@
 #define IDC_HELP_LINK                           40174
 #define IDC_HELP_STATIC3                        40175
 #define IDC_HELP_STATIC4                        40176
-#define IDC_LNAGR_SWITCH						40178
 #define IDC_TOTALGR                             40179
 #define IDC_STATIONNAME                         40180
 #define IDD_STATION_PANEL                       40181
@@ -116,3 +112,5 @@
 #define IDC_APIVER								40206
 #define IDC_APIPATH								40207
 #define IDC_REGPATH								40208
+#define IDC_LNASLIDER							40209
+#define IDC_PPMTXT								40210
