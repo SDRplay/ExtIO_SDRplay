@@ -1,7 +1,8 @@
 
 /* *******************************************************************************/
 /*					EXTIO Plugin Interface for SDRplay RSPduo					 */
-/*									V1.4 build 0902								 */
+/*									V1.5 build 0908								 */
+/* Version 1.5 built against API 3.11											 */
 /* Version 1.4 built against API 3.11											 */
 /* Version 1.2 built against API 3.06                                            */
 /*********************************************************************************/
@@ -36,10 +37,10 @@
 using namespace std;
 
 // main debug control - check output with debugview
-#define DEBUG_ENABLE
+//#define DEBUG_ENABLE
 
 // hardware debug output (watch with debugview)
-#define RSP_DEBUG 1
+#define RSP_DEBUG 0
 // station lookup debug - output to station control panel
 //#define DEBUG_STATION
 
@@ -116,7 +117,7 @@ int biasTEnable = 0;
 int dabNotchEnable = 0;
 bool slaveAttached = false;
 int HiZPort = 0;
-
+bool swapTunerAfterInit = false;
 volatile int BandwidthIdx = 3;
 
 int DecimationIdx = 0;
@@ -1196,8 +1197,58 @@ typedef LONG NTSTATUS;
 #define STATUS_BUFFER_TOO_SMALL ((NTSTATUS)0xC0000023L)
 #endif
 
+void DebugLog(const char* const Format, ...)
+{
+	// Generic Debug Logging function
+#ifdef DEBUG_ENABLE
+	int Retval;
+	char dbgMsgBuffer[1024];
+	va_list Args;
+	va_start(Args, Format);
+
+	Retval = vsnprintf_s(dbgMsgBuffer, _countof(dbgMsgBuffer), _TRUNCATE, Format, Args);
+
+	if (Retval < 0)
+	{
+		OutputDebugString("ExtIO: Error in DebugLog");
+	}
+	else
+	{
+		OutputDebugString(dbgMsgBuffer);
+	}
+	va_end(Args);
+#endif
+}
+
+void SwapTuners()
+{
+	sdrplay_api_ErrT err;
+
+	if (Running)
+	{
+		err = sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, (HiZPort == 1) ? sdrplay_api_RspDuo_AMPORT_1 : sdrplay_api_RspDuo_AMPORT_2);
+
+		if (err != sdrplay_api_Success)
+		{
+			DebugLog("ExtIO: Device not initialised... set to swap after Init");
+			swapTunerAfterInit = true;
+		}
+		else
+		{
+			chParams = (chosenDev->tuner == sdrplay_api_Tuner_A) ? deviceParams->rxChannelA : deviceParams->rxChannelB;
+			DebugLog("ExtIO: Now on %s", (chosenDev->tuner == sdrplay_api_Tuner_A) ? "Tuner 1" : "Tuner 2");
+		}
+	}
+	else
+	{
+		DebugLog("ExtIO: Device not intiialised... set to swap after Init");
+		swapTunerAfterInit = true;
+	}
+}
+
 std::wstring GetKeyPathFromKKEY(HKEY key)
 {
+	DebugLog("ExtIO: ExtIO: GetKeyPathFromKKEY");
 	std::wstring keyPath;
 	if (key != NULL)
 	{
@@ -1331,17 +1382,13 @@ bool copyCSVtoHDD(char *filename)
 	
 	if (WSAStartup(MAKEWORD(2, 0), &wsaData) != 0)
 	{
-#ifdef DEBUG_ENABLE
-		OutputDebugString("WSAStartup error");
-#endif
+		DebugLog("ExtIO: WSAStartup Error");
 		return false;
 	}
 
 	if ((sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
 	{
-#ifdef DEBUG_ENABLE
-		OutputDebugString("socket error");
-#endif
+		DebugLog("ExtIO: socket error");
 		return false;
 	}
 
@@ -1349,11 +1396,7 @@ bool copyCSVtoHDD(char *filename)
 
 	hostent *record = gethostbyname(shost.c_str());
 
-#ifdef DEBUG_ENABLE
-	char tmpString[1024];
-	sprintf_s(tmpString, 1024, "%s", record->h_name);
-	OutputDebugString(tmpString);
-#endif
+	DebugLog("ExtIO: %s", record->h_name);
 
 	in_addr *address = (in_addr *)record->h_addr;
 	string ipd = inet_ntoa(*address);
@@ -1365,9 +1408,7 @@ bool copyCSVtoHDD(char *filename)
 
 	if (connect(sock, (struct sockaddr *) &serveraddr, sizeof(serveraddr)) < 0)
 	{
-#ifdef DEBUG_ENABLE
-		OutputDebugString("can't connect");
-#endif
+		DebugLog("ExtIO: can't connect");
 		localDBExists = false;
 		if (h_StationConfigDialog != NULL)
 			Edit_SetText(GetDlgItem(h_StationConfigDialog, IDC_STATIONCONFIG_STATUS), "Database Status: No route to host");
@@ -1376,9 +1417,7 @@ bool copyCSVtoHDD(char *filename)
 
 	if (send(sock, request.c_str(), request.length(), 0) == INVALID_SOCKET)
 	{
-#ifdef DEBUG_ENABLE
-		OutputDebugString("can't send");
-#endif
+		DebugLog("ExtIO: can't send");
 		return false;
 	}
 //	shutdown(sock, SD_SEND);
@@ -1388,17 +1427,13 @@ bool copyCSVtoHDD(char *filename)
 
 	if (nRecv == 0)
 	{
-#ifdef DEBUG_ENABLE
-		OutputDebugString("received 0 bytes header");
-#endif
+		DebugLog("ExtIO: received 0 bytes header");
 		return false;
 	}
 
 	if (nRecv == SOCKET_ERROR)
 	{
-#ifdef DEBUG_ENABLE
-		OutputDebugString("nRecv initial socket error");
-#endif
+		DebugLog("ExtIO: nRecv initial socket error");
 		return false;
 	}
 
@@ -1409,9 +1444,7 @@ bool copyCSVtoHDD(char *filename)
 	hFile = CreateFileA(filename, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
 	if (hFile == INVALID_HANDLE_VALUE)
 	{
-#ifdef DEBUG_ENABLE
-		OutputDebugString("cannot create file");
-#endif
+		DebugLog("ExtIO: cannot create file");
 		return false;
 	}
 	if (SetFilePointer(hFile, 0, NULL, FILE_BEGIN) != INVALID_SET_FILE_POINTER)
@@ -1426,9 +1459,7 @@ bool copyCSVtoHDD(char *filename)
 				memcpy(bf, buffer + (npos + 4), nRecv - (npos + 4));
 				if (WriteFile(hFile, bf, nRecv - (npos + 4), &ss, NULL) == 0)
 				{
-#ifdef DEBUG_ENABLE
-					OutputDebugString("initial write failed");
-#endif
+					DebugLog("ExtIO: initial write failed");
 					return false;
 				}
 			}
@@ -1436,9 +1467,7 @@ bool copyCSVtoHDD(char *filename)
 			{
 				if (WriteFile(hFile, buffer, nRecv, &ss, NULL) == 0)
 				{
-#ifdef DEBUG_ENABLE
-					OutputDebugString("main write failed");
-#endif
+					DebugLog("ExtIO: main write failed");
 					return false;
 				}
 			}
@@ -1447,9 +1476,7 @@ bool copyCSVtoHDD(char *filename)
 			nRecv = recv(sock, (char *)&buffer, BUFFER_LEN, 0);
 			if (nRecv == SOCKET_ERROR)
 			{
-#ifdef DEBUG_ENABLE
-				OutputDebugString("nRecv main socket error");
-#endif
+				DebugLog("ExtIO: nRecv main socket error");
 				return false;
 			}
 			str_buff = buffer;
@@ -1458,16 +1485,12 @@ bool copyCSVtoHDD(char *filename)
 
 		if (nRecv == 0)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("nRecv == 0");
-#endif
+			DebugLog("ExtIO: nRecv == 0");
 		}
 
 		if (nRecv == INVALID_SOCKET)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("nRecv final invalid socket");
-#endif
+			DebugLog("ExtIO: nRecv final invalid socket");
 			return false;
 		}
 
@@ -1482,9 +1505,7 @@ bool copyCSVtoHDD(char *filename)
 	}
 	else
 	{
-#ifdef DEBUG_ENABLE
-		OutputDebugString("file pointer error");
-#endif
+		DebugLog("ExtIO: file pointer error");
 		CloseHandle(hFile);
 		closesocket(sock);
 		WSACleanup();
@@ -1496,6 +1517,7 @@ bool copyCSVtoHDD(char *filename)
 
 bool DirectoryExists(LPCWSTR szPath)
 {
+	DebugLog("ExtIO: DirectoryExists: szPath:%s", szPath);
 	DWORD dwAttrib = GetFileAttributesW(szPath);
 
 	return (dwAttrib != INVALID_FILE_ATTRIBUTES &&
@@ -1510,6 +1532,7 @@ bool FileExists(const char *filename)
 
 bool FileModifiedToday(char *pFileName)
 {
+	DebugLog("ExtIO: FileModifiedToday: pFileName: %s", pFileName);
 	struct stat attrib;
 	time_t rawtime;
 	tm timeinfo;
@@ -1521,13 +1544,8 @@ bool FileModifiedToday(char *pFileName)
 	gmtime_s(&timeinfo, &(attrib.st_mtime));
 	gmtime_s(&timeinfoNow, &rawtime);
 
-#ifdef DEBUG_ENABLE
-	char tmpString[1204];
-	sprintf_s(tmpString, 1024, "%d %d %d", (1900 + timeinfo.tm_year), (1 + timeinfo.tm_mon), timeinfo.tm_mday);
-	OutputDebugString(tmpString);
-	sprintf_s(tmpString, 1024, "%d %d %d", (1900 + timeinfoNow.tm_year), (1 + timeinfoNow.tm_mon), timeinfoNow.tm_mday);
-	OutputDebugString(tmpString);
-#endif
+	DebugLog("ExtIO: %d %d %d", (1900 + timeinfo.tm_year), (1 + timeinfo.tm_mon), timeinfo.tm_mday);
+	DebugLog("ExtIO: %d %d %d", (1900 + timeinfoNow.tm_year), (1 + timeinfoNow.tm_mon), timeinfoNow.tm_mday);
 
 	if ((timeinfo.tm_year == timeinfoNow.tm_year) && (timeinfo.tm_mon == timeinfoNow.tm_mon) && (timeinfo.tm_mday == timeinfoNow.tm_mday))
 	{
@@ -1561,9 +1579,7 @@ void closePopUpWindow(void)
 extern "C"
 void LIBSDRplay_API  __stdcall HideGUI()
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("HideGUI");
-#endif
+	DebugLog("ExtIO: HideGUI");
 	int i;
 	for (i = 1; i <= NUM_OF_HOTKEYS; i++)
 	{
@@ -1576,22 +1592,16 @@ void LIBSDRplay_API  __stdcall HideGUI()
 extern "C"
 void LIBSDRplay_API __stdcall StopHW()
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("StopHW");
-#endif
+	DebugLog("ExtIO: StopHW");
 	Running = false;
-#ifdef DEBUG_ENABLE
-	OutputDebugString("Uninit");
-#endif
+	DebugLog("ExtIO: call sdrplay_api_Uninit");
 	sdrplay_api_Uninit_fn(chosenDev->dev);
 }
 
 extern "C"
 void LIBSDRplay_API __stdcall CloseHW()
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("CloseHW");
-#endif
+	DebugLog("ExtIO: CloseHW");
 
 	SaveSettings();
 
@@ -1610,28 +1620,20 @@ void LIBSDRplay_API __stdcall CloseHW()
 
 	if (Running)
 	{
-#ifdef DEBUG_ENABLE
-		OutputDebugString("Uninit");
-#endif
+		DebugLog("ExtIO: call sdrplay_Uninit");
 		sdrplay_api_Uninit_fn(chosenDev->dev);
 		Running = false;
 	}
-#ifdef DEBUG_ENABLE
-	OutputDebugString("ReleaseDevice");
-#endif
+	DebugLog("ExtIO: call sdrplay_api_ReleaseDevice");
 	sdrplay_api_ReleaseDevice_fn(chosenDev);
-#ifdef DEBUG_ENABLE
-	OutputDebugString("Close API");
-#endif
+	DebugLog("ExtIO: call sdrplay_api_Close");
 	sdrplay_api_Close_fn();
 }
 
 extern "C"
 bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("InitHW");
-#endif
+	DebugLog("ExtIO: InitHW: name:%s, model:%s, type:%d", name, model, type);
 	char APIkeyValue[8192];
 	char tmpStringA[8192];
 	char str[1024 + 8192];
@@ -1732,13 +1734,11 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 		return false;
 	}
 
-#ifdef DEBUG_ENABLE
-	OutputDebugString("Open API");
-#endif
+	DebugLog("ExtIO: call sdrplay_api_Open");
 	err = sdrplay_api_Open_fn();
 	if (err != sdrplay_api_Success)
 	{
-		OutputDebugString("Cannot connect to API Service");
+		DebugLog("ExtIO: Cannot connect to API Service");
 		MessageBox(NULL, TEXT("Unable to connect to API Service, restart service and try again"), TEXT("SDRplay ExtIO Error"), MB_ICONERROR | MB_OK);
 		return false;
 	}
@@ -1746,28 +1746,25 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 	err = sdrplay_api_LockDeviceApi_fn();
 	if (err != sdrplay_api_Success)
 	{
-		OutputDebugString("Cannot Lock the API");
+		DebugLog("ExtIO: Cannot Lock the API");
 		MessageBox(NULL, TEXT("Unable to lock the API"), TEXT("SDRplay ExtIO Error"), MB_ICONERROR | MB_OK);
-#ifdef DEBUG_ENABLE
-		OutputDebugString("Close API");
-#endif
+		DebugLog("ExtIO: call sdrplay_api_Close");
 		sdrplay_api_Close_fn();
 		return false;
 	}
 
-#ifdef DEBUG_ENABLE
-	OutputDebugString("Get Device Information...");
+	DebugLog("ExtIO: Get Device Information...");
 	sdrplay_api_DebugEnable_fn(NULL, (sdrplay_api_DbgLvl_t)RSP_DEBUG);
-#endif
+
 	bool foundRSPduo = false;
+	DebugLog("ExtIO: call sdrplay_api_GetDevices");
 	sdrplay_api_GetDevices_fn(devices, &numDevs, MAXNUMOFDEVS);
 	if (devices != NULL)
 	{
 		unsigned int i;
 		for (i = 0; i < numDevs; i++)
 		{
-			_snprintf_s(msgbuf, 1024, "[%d/%d] SerNo=%s hwVer=%d", (i + 1), numDevs, devices[i].SerNo, devices[i].hwVer);
-			OutputDebugString(msgbuf);
+			DebugLog("ExtIO: [%d/%d] SerNo=%s hwVer=%d", (i + 1), numDevs, devices[i].SerNo, devices[i].hwVer);
 			if (devices[i].hwVer == SDRPLAY_RSPduo_ID)
 			{
 				chosenDevice = i;
@@ -1776,9 +1773,11 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 				if (chosenDev->rspDuoMode & sdrplay_api_RspDuoMode_Master || chosenDev->rspDuoMode & sdrplay_api_RspDuoMode_Dual_Tuner || chosenDev->rspDuoMode & sdrplay_api_RspDuoMode_Single_Tuner)
 				{	// Single Tuner
 					ModeIdx = 0;
+					DebugLog("ExtIO: set single tuner");
 					chosenDev->rspDuoMode = sdrplay_api_RspDuoMode_Single_Tuner;
 					if (chosenDev->tuner & sdrplay_api_Tuner_A)
 					{
+						DebugLog("ExtIO: set tuner A");
 						chosenDev->tuner = sdrplay_api_Tuner_A;
 						TunerIdx = 0;
 						Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 1);
@@ -1786,6 +1785,7 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 					}
 					else
 					{
+						DebugLog("ExtIO: set tuner B");
 						chosenDev->tuner = sdrplay_api_Tuner_B;
 						TunerIdx = 1;
 						HiZPort = 0;
@@ -1798,6 +1798,7 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 				else
 				{	// Slave
 					IFmodeIdx = 1; // Force Low IF mode
+					DebugLog("ExtIO: set slave mode");
 					chosenDev->rspDuoMode = sdrplay_api_RspDuoMode_Slave;
 					if (chosenDev->tuner & sdrplay_api_Tuner_A)
 					{
@@ -1818,81 +1819,64 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 					Edit_Enable(GetDlgItem(h_dialog, IDC_TUNERSELECT), 0);
 				}
 
+				DebugLog("ExtIO: call sdrplay_api_SelectDevice");
 				err = sdrplay_api_SelectDevice_fn(chosenDev);
 				if (err != sdrplay_api_Success)
 				{
-					OutputDebugString("SelectDevice error");
+					DebugLog("ExtIO: SelectDevice error");
 					MessageBox(NULL, TEXT("Cannot open the device"), TEXT("SDRplay ExtIO Error"), MB_ICONERROR | MB_OK);
-#ifdef DEBUG_ENABLE
-					OutputDebugString("UnlockDeviceApi");
-#endif
+
+					DebugLog("ExtIO: call sdrplay_api_UnlockDeviceApi");
 					sdrplay_api_UnlockDeviceApi_fn();
-#ifdef DEBUG_ENABLE
-					OutputDebugString("Close API");
-#endif
+
+					DebugLog("ExtIO: call sdrplay_api_Close");
 					sdrplay_api_Close_fn();
 					return false;
 				}
 				foundRSPduo = true;
-#ifdef DEBUG_ENABLE
-				OutputDebugString("UnlockDeviceApi");
-#endif
+
+				DebugLog("ExtIO: call sdrplay_api_UnlockDeviceApi");
 				sdrplay_api_UnlockDeviceApi_fn();
 				break;
 			}
 		}
 		if (!foundRSPduo) {
-			OutputDebugString("No RSPduos found.");
+			DebugLog("ExtIO: No RSPduos found.");
 			MessageBox(NULL, TEXT("Failed to find any available RSPduos"), TEXT("SDRplay ExtIO Error"), MB_ICONERROR | MB_OK);
-#ifdef DEBUG_ENABLE
-			OutputDebugString("UnlockDeviceApi");
-#endif
+			DebugLog("ExtIO: call sdrplay_api_UnlockDeviceApi");
 			sdrplay_api_UnlockDeviceApi_fn();
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Close API");
-#endif
+			DebugLog("ExtIO: call sdrplay_api_Close");
 			sdrplay_api_Close_fn();
 			return false;
 		}
 	}
 	else
 	{
-#ifdef DEBUG_ENABLE
-		OutputDebugString("No RSPs found.");
-#endif
+		DebugLog("ExtIO: No RSPs found.");
 		MessageBox(NULL, TEXT("Failed to find any RSPs"), TEXT("SDRplay ExtIO Error"), MB_ICONERROR | MB_OK);
-#ifdef DEBUG_ENABLE
-		OutputDebugString("UnlockDeviceApi");
-#endif
+		DebugLog("ExtIO: call sdrplay_api_UnlockDeviceApi");
 		sdrplay_api_UnlockDeviceApi_fn();
-#ifdef DEBUG_ENABLE
-		OutputDebugString("Close API");
-#endif
+		DebugLog("ExtIO: call sdrplay_api_Close");
 		sdrplay_api_Close_fn();
 		return false;
 	}
 
 	// We have a device at this point
-#ifdef DEBUG_ENABLE
 	sdrplay_api_DebugEnable_fn(devices[chosenDevice].dev, (sdrplay_api_DbgLvl_t)RSP_DEBUG);
-#endif
 
+	DebugLog("ExtIO: call sdrplay_api_GetDeviceParams");
 	err = sdrplay_api_GetDeviceParams_fn(chosenDev->dev, &deviceParams);
 	if (err != sdrplay_api_Success)
 	{
-		sprintf_s(tmpStringA, "GetDeviceParams error (%s)", sdrplay_api_GetErrorString_fn(err));
-		OutputDebugString(tmpStringA);
-#ifdef DEBUG_ENABLE
-		OutputDebugString("UnlockDeviceApi");
-#endif
+		DebugLog("ExtIO: GetDeviceParams error (%s)", sdrplay_api_GetErrorString_fn(err));
+		DebugLog("ExtIO: call sdrplay_api_UnlockDeviceApi");
 		sdrplay_api_UnlockDeviceApi_fn();
-#ifdef DEBUG_ENABLE
-		OutputDebugString("Close API");
-#endif
+		DebugLog("ExtIO: cakk sdrplay_api_Close");
 		sdrplay_api_Close_fn();
 		return false;
 	}
 
+	DebugLog("ExtIO: Set chParams: %s", (chosenDev->tuner == sdrplay_api_Tuner_A) ? "Tuner 1" : "Tuner 2");
 	chParams = (chosenDev->tuner == sdrplay_api_Tuner_A) ? deviceParams->rxChannelA : deviceParams->rxChannelB;
 
 	error = RegOpenKeyEx(HKEY_CURRENT_USER, TEXT("Software\\SDRplay\\RSPduo_Settings"), 0, KEY_ALL_ACCESS, &Settingskey);
@@ -1901,9 +1885,7 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 		error = RegQueryValueEx(Settingskey, "StationLookup", NULL, NULL, (LPBYTE)&tempRB, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall saved StationLookup state");
-#endif
+			DebugLog("ExtIO: Failed to recall saved StationLookup state");
 			stationLookup = false;
 		}
 		if (tempRB == 1)
@@ -1953,9 +1935,7 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 						startupPopUpWindow();
 						if (!copyCSVtoHDD(newString))
 						{
-#ifdef DEBUG_ENABLE
-							OutputDebugString("error during copy");
-#endif
+							DebugLog("ExtIO: error during copy");
 							localDBExists = false;
 							if (h_StationConfigDialog != NULL)
 								Edit_SetText(GetDlgItem(h_StationConfigDialog, IDC_STATIONCONFIG_STATUS), "Database Status: Copy failed");
@@ -1970,9 +1950,7 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 				}
 				else
 				{
-#ifdef DEBUG_ENABLE
-					OutputDebugString("no file exists");
-#endif
+					DebugLog("ExtIO: no file exists");
 					if (workOffline)
 					{
 						localDBExists = false;
@@ -1984,9 +1962,7 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 						startupPopUpWindow();
 						if (!copyCSVtoHDD(newString))
 						{
-#ifdef DEBUG_ENABLE
-							OutputDebugString("error during copy");
-#endif
+							DebugLog("ExtIO: error during copy");
 							localDBExists = false;
 							if (h_StationConfigDialog != NULL)
 								Edit_SetText(GetDlgItem(h_StationConfigDialog, IDC_STATIONCONFIG_STATUS), "Database Status: Copy failed");
@@ -2005,22 +1981,19 @@ bool  LIBSDRplay_API __stdcall InitHW(char *name, char *model, int &type)
 		}
 	}
 
-#ifdef DEBUG_ENABLE
-	OutputDebugString("Hardware sucessfully initalised & Registry paths found");
-#endif
+	DebugLog("ExtIO: Hardware sucessfully initalised & Registry paths found");
 	sprintf_s(name, 32, "%s", "SDRplay RSP");
 	sprintf_s(model, 32, "%s", "Radio Spectrum Processor");
 	type = 3;
 	closePopUpWindow();
+	DebugLog("ExtIO: InitHW end");
 	return true;
 }
 
 extern "C"
 bool  LIBSDRplay_API __stdcall OpenHW()
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("OpenHW");
-#endif
+	DebugLog("ExtIO: OpenHW");
     h_dialog=CreateDialog(hInst, MAKEINTRESOURCE(IDD_SDRPLAY_SETTINGS), NULL, (DLGPROC)MainDlgProc);
 	ShowWindow(h_dialog, SW_HIDE);
 	BringWindowToTop(h_dialog);
@@ -2032,14 +2005,8 @@ long LIBSDRplay_API __stdcall SetHWLO(unsigned long freq)
 {
 	sdrplay_api_ErrT err;
 
-	#ifdef DEBUG_ENABLE
-	OutputDebugString("SetHWLO");
-	#endif
+	DebugLog("ExtIO: SetHWLO: freq: %lu", freq);
 
-	#ifdef DEBUG_ENABLE
-	_snprintf_s(msgbuf, 1024, "%s %lu", "Frequency is", freq);
-	OutputDebugString(msgbuf);
-	#endif
 	WinradCallBack(-1, WINRAD_LOBLOCKED, 0, NULL);
 	if (freq > 2000000000)
 	{
@@ -2061,6 +2028,7 @@ long LIBSDRplay_API __stdcall SetHWLO(unsigned long freq)
 	// if greater than 30MHz and HiZ port in use, then revert to 50 ohm port
 	if (freq >= 30000000 && (chosenDev->tuner & sdrplay_api_Tuner_A) && (chParams->rspDuoTunerParams.tuner1AmPortSel == sdrplay_api_RspDuo_AMPORT_1))
 	{
+		DebugLog("ExtIO: Switch away from HiZ port");
 		// LNA Gain Reduction change limit
 		HiZPort = 0;
 		Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 1);
@@ -2085,20 +2053,22 @@ long LIBSDRplay_API __stdcall SetHWLO(unsigned long freq)
 				SendMessage(GetDlgItem(h_dialog, IDC_LNASLIDER), TBM_SETPOS, (WPARAM)true, (LPARAM)LNAGainReduction);
 				Edit_SetText(GetDlgItem(h_dialog, IDC_LNAGRNO), LNAGainReductionTxt);
 			}
-
 			SendMessage(GetDlgItem(h_dialog, IDC_LNASLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)LNA_GAIN_SLIDER_MAX_AM_50OHM);
 		}
 		else
 		{
 			SendMessage(GetDlgItem(h_dialog, IDC_LNASLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)LNA_GAIN_SLIDER_MAX);
 		}
+
+		DebugLog("ExtIO: set AM port");
 		chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
 		if (Running)
 		{
+			DebugLog("ExtIO: call sdrplay_api_Update sdrplay_api_Update_RspDuo_AmPortSelect");
 			err = sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
 			if (err != sdrplay_api_Success)
 			{
-				OutputDebugString("AM Port Update error");
+				DebugLog("ExtIO: AM Port Update error");
 			}
 		}
 	}
@@ -2113,7 +2083,6 @@ long LIBSDRplay_API __stdcall SetHWLO(unsigned long freq)
 			Edit_SetText(GetDlgItem(h_dialog, IDC_LNAGRNO), LNAGainReductionTxt);
 		}
 		SendMessage(GetDlgItem(h_dialog, IDC_LNASLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)LNA_GAIN_SLIDER_MAX_LBAND);
-
 	}
 	else if (freq < 60000000)
 	{
@@ -2124,7 +2093,6 @@ long LIBSDRplay_API __stdcall SetHWLO(unsigned long freq)
 			SendMessage(GetDlgItem(h_dialog, IDC_LNASLIDER), TBM_SETPOS, (WPARAM)true, (LPARAM)LNAGainReduction);
 			Edit_SetText(GetDlgItem(h_dialog, IDC_LNAGRNO), LNAGainReductionTxt);
 		}
-
 		SendMessage(GetDlgItem(h_dialog, IDC_LNASLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)LNA_GAIN_SLIDER_MAX_AM_50OHM);
 	}
 	else
@@ -2132,20 +2100,21 @@ long LIBSDRplay_API __stdcall SetHWLO(unsigned long freq)
 		SendMessage(GetDlgItem(h_dialog, IDC_LNASLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)LNA_GAIN_SLIDER_MAX);
 	}
 
-
 	//Code to limit Dialog Box Movement
 	Frequency = (double)freq / 1000000;
 
+	DebugLog("ExtIO: Set RF freq");
 	chParams->tunerParams.rfFreq.rfHz = freq;
 	if (Running)
 	{
 		err = sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Tuner_Frf, sdrplay_api_Update_Ext1_None);
 		if (err != sdrplay_api_Success)
 		{
-			OutputDebugString("Frequency program error");
+			DebugLog("ExtIO: Frequency program error");
 		}
 	}
 
+	DebugLog("ExtIO: SetHWLO end");
 	WinradCallBack(-1, WINRAD_LORELEASED, 0, NULL);
 	return 0;
 }
@@ -2175,8 +2144,7 @@ void eventCallback(sdrplay_api_EventT eventId, sdrplay_api_TunerSelectT tunerS, 
 	char str[512];
 
 #ifdef RSP_DEBUG
-	sprintf_s(str, sizeof(str), "gRdB: %d, lnaGrdB: %d", params->gainParams.gRdB, params->gainParams.lnaGRdB);
-	OutputDebugString(str);
+	DebugLog("ExtIO: eventCallback: gRdB: %d, lnaGrdB: %d", params->gainParams.gRdB, params->gainParams.lnaGRdB);
 #endif
 
 	switch (eventId)
@@ -2201,13 +2169,13 @@ void eventCallback(sdrplay_api_EventT eventId, sdrplay_api_TunerSelectT tunerS, 
 
 		if (params->powerOverloadParams.powerOverloadChangeType == sdrplay_api_Overload_Detected)
 		{
-			OutputDebugString("*** ADC OVERLOAD DETECTED ***");
+			DebugLog("ExtIO: eventCallback: *** ADC OVERLOAD DETECTED ***");
 			sprintf_s(str, sizeof(str), "ADC OVERLOAD");
 			Edit_SetText(GetDlgItem(h_dialog, IDC_OVERLOAD), str);
 		}
 		else
 		{
-			OutputDebugString("*** ADC OVERLOAD CORRECTED ***");
+			DebugLog("ExtIO: eventCallback: *** ADC OVERLOAD CORRECTED ***");
 			sprintf_s(str, sizeof(str), "");
 			Edit_SetText(GetDlgItem(h_dialog, IDC_OVERLOAD), str);
 		}
@@ -2216,48 +2184,34 @@ void eventCallback(sdrplay_api_EventT eventId, sdrplay_api_TunerSelectT tunerS, 
 
 		if (params->rspDuoModeParams.modeChangeType == sdrplay_api_SlaveAttached)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Slave Attached");
-#endif
+			DebugLog("ExtIO: eventCallback: Slave Attached");
 			slaveAttached = true;
 		}
 		else if (params->rspDuoModeParams.modeChangeType == sdrplay_api_SlaveDetached)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Slave Detatched");
-#endif
+			DebugLog("ExtIO: eventCallback: Slave Detatched");
 			slaveAttached = false;
 		}
 		else if (params->rspDuoModeParams.modeChangeType == sdrplay_api_MasterInitialised)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Master Initialised");
-#endif
+			DebugLog("ExtIO: eventCallback: Master Initialised");
 		}
 		else if (params->rspDuoModeParams.modeChangeType == sdrplay_api_SlaveInitialised)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Slave Initialised");
-#endif
+			DebugLog("ExtIO: eventCallback: Slave Initialised");
 		}
 		else if (params->rspDuoModeParams.modeChangeType == sdrplay_api_SlaveUninitialised)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Slave Uninitialised");
-#endif
+			DebugLog("ExtIO: eventCallback: Slave Uninitialised");
 		}
 		else if (params->rspDuoModeParams.modeChangeType == sdrplay_api_SlaveDllDisappeared)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Slave Dll Disappeared");
-#endif
+			DebugLog("ExtIO: eventCallback: Slave Dll Disappeared");
 			slaveAttached = false;
 		}
 		else if (params->rspDuoModeParams.modeChangeType == sdrplay_api_MasterDllDisappeared)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Master Dll Disappeared");
-#endif
+			DebugLog("ExtIO: eventCallback: Master Dll Disappeared");
 			WinradCallBack(-1, WINRAD_STOP, 0, NULL);
 			HideGUI();
 			StopHW();
@@ -2269,9 +2223,7 @@ void eventCallback(sdrplay_api_EventT eventId, sdrplay_api_TunerSelectT tunerS, 
 		if (Running)
 		{
 			Running = false;
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Uninit");
-#endif
+			DebugLog("ExtIO: call sdrplay_api_Uninit");
 			sdrplay_api_Uninit_fn(chosenDev->dev);
 		}
 		break;
@@ -2290,11 +2242,7 @@ void sdrplayCallbackA(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
 
    if (reset)
    {
-#ifdef DEBUG_ENABLE
-	   char m_str[1024];
-      sprintf_s(m_str, sizeof(m_str), "sdrplayCallbackA: %d", numSamples);
-      OutputDebugString(m_str);
-#endif
+      DebugLog("ExtIO: sdrplayCallbackA: %d", numSamples);
       BufferCounter = 0;
    }
 
@@ -2348,11 +2296,7 @@ void sdrplayCallbackB(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
 
 	if (reset)
 	{
-#ifdef DEBUG_ENABLE
-		char m_str[1024];
-		sprintf_s(m_str, sizeof(m_str), "sdrplayCallbackA: %d", numSamples);
-		OutputDebugString(m_str);
-#endif
+		DebugLog("ExtIO: sdrplayCallbackB: %d", numSamples);
 		BufferCounter = 0;
 	}
 
@@ -2398,20 +2342,14 @@ extern "C"
 bool LIBSDRplay_API __stdcall IQCompensation(bool Enable)
 {
 	sdrplay_api_ErrT Error;
-#ifdef DEBUG_ENABLE	
-	OutputDebugString("IQCompensation");
-	char *errString = NULL;
-#endif
+	DebugLog("ExtIO: IQCompensation: %s", (Enable == true) ? "True" : "False");
 
 	chParams->ctrlParams.dcOffset.DCenable = (unsigned int)Enable;
 	chParams->ctrlParams.dcOffset.IQenable = (unsigned int)Enable;
 	Error = sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_Ctrl_DCoffsetIQimbalance, sdrplay_api_Update_Ext1_None);
 	if (Error != sdrplay_api_Success)
 	{
-#ifdef DEBUG_ENABLE
-		sprintf_s(errString, 1024, "Enable/Disable DC/IQ Correction Failed (%s)", sdrplay_api_GetErrorString_fn(Error));
-		OutputDebugString(errString);
-#endif
+		DebugLog("ExtIO: Enable/Disable DC/IQ Correction Failed (%s)", sdrplay_api_GetErrorString_fn(Error));
 		return false;
 	}
 	return true;
@@ -2421,10 +2359,8 @@ extern "C"
 int LIBSDRplay_API __stdcall StartHW(unsigned long freq)
 {
 	double sampleRateLocal;
-	char str[255];
-#ifdef DEBUG_ENABLE
-	OutputDebugString("StartHW");
-#endif
+	sdrplay_api_ErrT err;
+	DebugLog("ExtIO: StartHW: freq: %lu", freq);
 
 	if (freq > 2000000000)
 	{
@@ -2443,32 +2379,26 @@ int LIBSDRplay_API __stdcall StartHW(unsigned long freq)
 	if ((chosenDev->rspDuoMode & sdrplay_api_RspDuoMode_Master && !slaveAttached) || chosenDev->rspDuoMode & sdrplay_api_RspDuoMode_Single_Tuner)
 		deviceParams->devParams->ppm = (float)FqOffsetPPM;
 
-#ifdef DEBUG_ENABLE
-    OutputDebugString("Calling Init");
-#endif
-
 	if (TunerIdx == 0)
 	{
-#ifdef DEBUG_ENABLE
-		OutputDebugString("Tuner 1");
-#endif
+		if (chosenDev->tuner != sdrplay_api_Tuner_A)
+		{
+			SwapTuners();
+		}
 		chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
-		chosenDev->tuner = sdrplay_api_Tuner_A;
 	}
 	else if (TunerIdx == 1)
 	{
-#ifdef DEBUG_ENABLE
-		OutputDebugString("Tuner 2");
-#endif
+		if (chosenDev->tuner != sdrplay_api_Tuner_B)
+		{
+			SwapTuners();
+		}
 		chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
-		chosenDev->tuner = sdrplay_api_Tuner_B;
 	}
 	
 	if (HiZPort == 1)
 	{
-#ifdef DEBUG_ENABLE
-		OutputDebugString("HiZ Port");
-#endif
+		DebugLog("ExtIO: HiZPort");
 		if (Frequency >= 30.0 && TunerIdx == 0) // i.e. greater than 30MHz and HiZ port in use, then revert to port A
 		{
 			// LNA Gain Reduction change limit
@@ -2476,12 +2406,14 @@ int LIBSDRplay_API __stdcall StartHW(unsigned long freq)
 			HiZPort = 0;
 			SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
 			chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
-			chosenDev->tuner = sdrplay_api_Tuner_A;
 		}
 		else
 		{
+			if (chosenDev->tuner != sdrplay_api_Tuner_A)
+			{
+				SwapTuners();
+			}
 			chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_1;
-			chosenDev->tuner = sdrplay_api_Tuner_A;
 		}
 	}
 	sampleRateLocal = samplerates[SampleRateIdx].value;
@@ -2521,26 +2453,44 @@ int LIBSDRplay_API __stdcall StartHW(unsigned long freq)
 
 	if (!Running)
 	{
-		sdrplay_api_ErrT err = sdrplay_api_Init_fn(chosenDev->dev, &cbFns, NULL);
-
-#ifdef DEBUG_ENABLE
-		OutputDebugString("sdrplay_api_Init_fn completed");
-#endif
+		DebugLog("ExtIO: call sdrplay_api_Init");
+		err = sdrplay_api_Init_fn(chosenDev->dev, &cbFns, NULL);
 		if (err == sdrplay_api_Success)
 		{
+			DebugLog("ExtIO: sdrplay_api_Init success");
 			Running = true;
+			if (swapTunerAfterInit)
+			{
+				swapTunerAfterInit = false;
+				err = sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, sdrplay_api_RspDuo_AMPORT_2);
+				if (err == sdrplay_api_Success)
+				{
+					chParams = (chosenDev->tuner == sdrplay_api_Tuner_A) ? deviceParams->rxChannelA : deviceParams->rxChannelB;
+					DebugLog("ExtIO: Changed to %s", (chosenDev->tuner == sdrplay_api_Tuner_A) ? "Tuner 1" : "Tuner 2");
+				}
+				else
+				{
+					DebugLog("ExtIO: Error swapping tuners");
+				}
+				if (chosenDev->tuner == sdrplay_api_Tuner_B && biasTEnable == 1)
+				{
+					DebugLog("ExtIO: Enable Bias-T");
+					chParams->rspDuoTunerParams.biasTEnable = 1;
+					sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_BiasTControl, sdrplay_api_Update_Ext1_None);
+				}
+			}
 			IQCompensation(PostTunerDcCompensation);
 			return buffer_len_samples / 2;
 		}
 		else
 		{
-			sprintf_s(str, 255, "sdrplay_api_Init Error (%s)", sdrplay_api_GetErrorString_fn(err));
-			OutputDebugString(str);
+			DebugLog("ExtIO: sdrplay_api_Init Error (%s)", sdrplay_api_GetErrorString_fn(err));
 		}
 		return 0;
 	}
 	else
 	{
+		DebugLog("ExtIO: Already running, sdrplay_api_Init not called");
 		return buffer_len_samples / 2;
 	}
 }
@@ -3039,9 +2989,7 @@ char * parseCSV(long freq)
 extern "C"
 void LIBSDRplay_API __stdcall TuneChanged(long vfoFreq)
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("TuneChanged");
-#endif
+	DebugLog("ExtIO: TuneChanged: vfoFreq: %ld", vfoFreq);
 	char stationName[256];
 	static HWND hwndTip1 = NULL;
 	static HWND hwndTip2 = NULL;
@@ -3054,10 +3002,8 @@ void LIBSDRplay_API __stdcall TuneChanged(long vfoFreq)
 	if (stationLookup && localDBExists)
 	{
 		result = parseCSV(vfoFreq);
-		sprintf_s(stationName, 256, "Station: %s", result);
-#ifdef DEBUG_ENABLE
-		OutputDebugString(stationName);
-#endif
+		_stprintf_s(stationName, 255, "Station: %s", result);
+		DebugLog("ExtIO: %s", stationName);
 		if (h_dialog != NULL)
 		{
 			hwndTool1 = GetDlgItem(h_dialog, IDC_STATIONNAME);
@@ -3113,7 +3059,7 @@ void LIBSDRplay_API __stdcall TuneChanged(long vfoFreq)
 	}
 	else
 	{
-		sprintf_s(stationName, 256, "Station: Disabled");
+		sprintf_s(stationName, 255, "Station: Disabled");
 		if (h_dialog != NULL)
 			Edit_SetText(GetDlgItem(h_dialog, IDC_STATIONNAME), stationName);
 		if (h_StationDialog != NULL)
@@ -3124,18 +3070,16 @@ void LIBSDRplay_API __stdcall TuneChanged(long vfoFreq)
 extern "C"
 char LIBSDRplay_API __stdcall GetMode(void)
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("GetMode");
-#endif
+	DebugLog("ExtIO: GetMode: %s", demodMode);
 	return demodMode;
 }
 
 extern "C"
-void LIBSDRplay_API __stdcall ModeChanged(char)
+void LIBSDRplay_API __stdcall ModeChanged(char m)
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("ModeChanged");
-#endif
+	// ‘A’  =  AM ‘E’  =  ECSS ‘F’  = FM ‘L’  =  LSB ‘U’  =  USB ‘C’  =  CW ‘D’  =  DRM
+	DebugLog("ExtIO: ModeChanged: %c", m);
+	demodMode = m;
 	return;
 }
 
@@ -3143,11 +3087,7 @@ extern "C"
 long LIBSDRplay_API __stdcall GetHWSR()
 {
 	TCHAR str[255];
-#ifdef DEBUG_ENABLE
-	OutputDebugString("GetHWSR");
-	sprintf_s(str, 255, "SampleRateIdx: %d", SampleRateIdx);
-	OutputDebugString(str);
-#endif
+	DebugLog("ExtIO: GetHWSR: SampleRateIdx: %d", SampleRateIdx);
 	long SR = (long)(2.0 * 1e6);
 
 	if (IFmodeIdx == 1)
@@ -3165,10 +3105,7 @@ long LIBSDRplay_API __stdcall GetHWSR()
 			SR = SR / Decimation[DecimationIdx].DecValue;
 		}
 	}
-#ifdef DEBUG_ENABLE
-	sprintf_s(str, 255, "SR: %d", SR);
-	OutputDebugString(str);
-#endif
+	DebugLog("ExtIO: Final SR: %d", SR);
 	sprintf_s(str, sizeof(str), "%.2f MHz", (SR / 1e6));
 	Edit_SetText(GetDlgItem(h_dialog, IDC_FINALSR), str);
 	return SR;
@@ -3177,58 +3114,54 @@ long LIBSDRplay_API __stdcall GetHWSR()
 extern "C"
 int LIBSDRplay_API __stdcall ExtIoGetSrates(int srate_idx, double *samplerate)
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("ExtIoGetSrates");
-#endif
 	if (srate_idx < (sizeof(samplerates) / sizeof(samplerates[0])))
 	{
 		*samplerate = samplerates[srate_idx].value * 1000000;
+		DebugLog("ExtIO: ExtIoGetSrates: %.0f", samplerates[srate_idx].value * 1000000);
 		return 0;
 	}
+	DebugLog("ExtIO: ExtIoGetSrates: 1");
 	return 1;	// ERROR
 }
 
 extern "C"
 int  LIBSDRplay_API __stdcall ExtIoGetActualSrateIdx(void)
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("ExtIoGetActualSrateIdx");
-#endif
+	DebugLog("ExtIO: ExtIoGetActualSrateIdx: 0");
 	return 0;
 }
 
 extern "C"
 int  LIBSDRplay_API __stdcall ExtIoSetSrate(int)
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("ExtIoSetSrate");
-#endif
+	DebugLog("ExtIO: ExtIoSetSrate: 1");
 	return 1;	// ERROR
 }
 
 extern "C"
 int  LIBSDRplay_API __stdcall GetAttenuators(int atten_idx, float *attenuation)
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("GetAttenuators");
-#endif
 	if (atten_idx < n_gains)
 	{
 		*attenuation = gains[atten_idx] * 1.0f;
+		DebugLog("ExtIO: GetAttenuators: atten_idx: %d, attenuation: %.0f", atten_idx, gains[atten_idx] * 1.0f);
 		return 0;
 	}
+	DebugLog("ExtIO: GetAttenuators: End");
 	return 1;	// End or Error
 }
 
 extern "C"
 int  LIBSDRplay_API __stdcall GetActualAttIdx(void)
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("GetActualAttIdx");
-#endif
+	
 	for (int i = 0; i < n_gains; i++)
 		if (last_gain == gains[i])
+		{
+			DebugLog("ExtIO: GetActualAttIdx: %d", i);
 			return i;
+		}
+	DebugLog("ExtIO: GetActualAttIdx: -1");
 	return -1;
 }
 
@@ -3290,48 +3223,55 @@ int   LIBSDRplay_API __stdcall ExtIoSetAGC(int)
 extern "C"
 int   LIBSDRplay_API __stdcall ExtIoGetSetting(int idx, char *description, char *value)
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("ExtIoGetSetting");
-#endif
 	switch (idx)
 	{
 		case 0:
 			sprintf_s(description, 1024, "%s", "SampleRateIdx");
 			sprintf_s(value, 1024, "%d", SampleRateIdx);
+			DebugLog("ExtIO: ExtIoGetSetting: idx: %d, description: %s, value: %s", idx, description, value);
 			return 0;
 		case 1:
 			sprintf_s(description, 1024, "%s", "Tuner AGC");
 			sprintf_s(value, 1024, "%d", 0);
+			DebugLog("ExtIO: ExtIoGetSetting: idx: %d, description: %s, value: %s", idx, description, value);
 			return 0;
 		case 2:
 			sprintf_s(description, 1024, "%s", "RTL_AGC");
 			sprintf_s(value, 1024, "%d", 0);
+			DebugLog("ExtIO: ExtIoGetSetting: idx: %d, description: %s, value: %s", idx, description, value);
 			return 0;
 		case 3:
 			sprintf_s(description, 1024, "%s", "Frequency_Correction");
 			sprintf_s(value, 1024, "%d", ppm_default);		// TODO: expecting int?? FqOffsetPPM??
+			DebugLog("ExtIO: ExtIoGetSetting: idx: %d, description: %s, value: %s", idx, description, value);
 			return 0;
 		case 4:
 			sprintf_s(description, 1024, "%s", "Tuner_Gain");
 			sprintf_s(value, 1024, "%d", GainReduction);	// TODO: Gain Reduction vs Gain?? LNA??
+			DebugLog("ExtIO: ExtIoGetSetting: idx: %d, description: %s, value: %s", idx, description, value);
 			return 0;
 		case 5:
 			sprintf_s(description, 1024, "%s", "Buffer_Size");
 			sprintf_s(value, 1024, "%d", buffer_default);	// TODO: correct??
+			DebugLog("ExtIO: ExtIoGetSetting: idx: %d, description: %s, value: %s", idx, description, value);
 			return 0;
 		case 6:
 			sprintf_s(description, 1024, "%s", "Offset_Tuning");
 			sprintf_s(value, 1024, "%d", 0);	// TODO: correct??
+			DebugLog("ExtIO: ExtIoGetSetting: idx: %d, description: %s, value: %s", idx, description, value);
 			return 0;
 		case 7:
 			sprintf_s(description, 1024, "%s", "Direct_Sampling");
 			sprintf_s(value, 1024, "%d", 0);	// TODO: correct??
+			DebugLog("ExtIO: ExtIoGetSetting: idx: %d, description: %s, value: %s", idx, description, value);
 			return 0;
 		case 8:
 			sprintf_s(description, 1024, "%s", "Device");
 			sprintf_s(value, 1024, "%d", 0); // TODO: only one device supported
+			DebugLog("ExtIO: ExtIoGetSetting: idx: %d, description: %s, value: %s", idx, description, value);
 			return 0;
 	}
+	DebugLog("ExtIO: ExtIoGetSetting: -1");
 	return -1; // ERROR
 }
 
@@ -3339,9 +3279,7 @@ extern "C"
 void  LIBSDRplay_API __stdcall ExtIoSetSetting(int idx, const char *value)
 {
 	int tempInt;
-#ifdef DEBUG_ENABLE
-	OutputDebugString("ExtIoSetSetting");
-#endif
+	DebugLog("ExtIO: ExtIoSetSetting: idx: %d, value: %s", idx, value);
 	switch (idx)
 	{
 	case 0: // Sample Rate
@@ -3461,9 +3399,7 @@ void LIBSDRplay_API  __stdcall SwitchGUI() // Hotkeys defined here
 extern "C"
 void LIBSDRplay_API __stdcall SetCallback(void(*myCallBack)(int, int, float, void *))
 {
-#ifdef DEBUG_ENABLE
-	OutputDebugString("SetCallback");
-#endif
+	DebugLog("ExtIO: SetCallback");
 	WinradCallBack = myCallBack;
 }
 
@@ -3753,6 +3689,7 @@ void SaveSettings()
 
 void LoadSettings()
 {
+	DebugLog("ExtIO: LoadSettings");
 	HKEY Settingskey;
 	int error, tempRB;
 	DWORD DoubleSz, IntSz;
@@ -3766,73 +3703,85 @@ void LoadSettings()
 		error = RegQueryValueEx(Settingskey, "LowerFqLimit", NULL, NULL, (LPBYTE)&LowerFqLimit, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Lower Frequency Limit set to 1 kHz");
-#endif
+			DebugLog("ExtIO: Lower Frequency Limit set to 1 kHz");
 			LowerFqLimit = 1;
 		}
 
 		error = RegQueryValueEx(Settingskey, "DcCompensationMode", NULL, NULL, (LPBYTE)&DcCompensationMode, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall DcCompensationMode");
-#endif
 			DcCompensationMode = 3;
+			DebugLog("ExtIO: Failed to recall DcCompensationMode, set to %d", DcCompensationMode);
+		}
+		else
+		{
+			DebugLog("ExtIO: DcCompensationMode: %d", DcCompensationMode);
 		}
 
 		error = RegQueryValueEx(Settingskey, "RefreshPeriodMemory", NULL, NULL, (LPBYTE)&RefreshPeriodMemory, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall Refresh Period");
-#endif
 			RefreshPeriodMemory = 2;
+			DebugLog("ExtIO: Failed to recall RefreshPeriodMemory, set to %d", RefreshPeriodMemory);
+		}
+		else
+		{
+			DebugLog("ExtIO: RefreshPeriodMemory: %d", RefreshPeriodMemory);
 		}
 
 		error = RegQueryValueEx(Settingskey, "TrackingPeriod", NULL, NULL, (LPBYTE)&TrackingPeriod, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall DC Compensation Tracking Period");
-#endif
 			TrackingPeriod = 20;
+			DebugLog("ExtIO: Failed to recall TrackingPeriod, set to %d", TrackingPeriod);
+		}
+		else
+		{
+			DebugLog("ExtIO: TrackingPeriod: %d", TrackingPeriod);
 		}
 
 		error = RegQueryValueEx(Settingskey, "Frequency", NULL, NULL, (LPBYTE)&Frequency, &DoubleSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall saved frequency state");
-#endif
 			Frequency = 98.8;
+			DebugLog("ExtIO: Failed to recall Frequency, set to %f", Frequency);
+		}
+		else
+		{
+			DebugLog("ExtIO: Frequency: %f", Frequency);
 		}
 
 		error = RegQueryValueEx(Settingskey, "LOplan", NULL, NULL, (LPBYTE)&LOplan, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall saved LO Plan");
-#endif
 			LOplan = LO120MHz;
+			DebugLog("ExtIO: Failed to recall LOplan, set to %d", LOplan);
+		}
+		else
+		{
+			DebugLog("ExtIO: LOplan: %d", LOplan);
 		}
 
 		error = RegQueryValueEx(Settingskey, "GainReduction", NULL, NULL, (LPBYTE)&GainReduction, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall saved Gain Reduction");
-#endif
 			GainReduction = INITIAL_GR;
+			DebugLog("ExtIO: Failed to recall GainReduction, set to %d", GainReduction);
+		}
+		else
+		{
+			DebugLog("ExtIO: GainReduction: %d", GainReduction);
 		}
 
 		error = RegQueryValueEx(Settingskey, "AGCsetpoint", NULL, NULL, (LPBYTE)&AGCsetpoint, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall saved AGC Setpoint");
-#endif
 			AGCsetpoint = -30;
+			DebugLog("ExtIO: Failed to recall AGCsetpoint, set to %d", AGCsetpoint);
+		}
+		else
+		{
+			DebugLog("ExtIO: AGCsetpoint: %d", AGCsetpoint);
 		}
 
 		if (chosenDev->rspDuoMode != sdrplay_api_RspDuoMode_Slave)
@@ -3840,33 +3789,40 @@ void LoadSettings()
 			error = RegQueryValueEx(Settingskey, "SampleRateIdx", NULL, NULL, (LPBYTE)&SampleRateIdx, &IntSz);
 			if (error != ERROR_SUCCESS)
 			{
-#ifdef DEBUG_ENABLE
-				OutputDebugString("Failed to recall saved Sample Rate");
-#endif
 				SampleRateIdx = 0;
+				DebugLog("ExtIO: Failed to recall SampleRateIdx, set to %d", SampleRateIdx);
+			}
+			else
+			{
+				DebugLog("ExtIO: SampleRateIdx: %d", SampleRateIdx);
 			}
 		}
 		else
 		{
 			SampleRateIdx = 0;
+			DebugLog("ExtIO: Slave: SampleRateIdx: %d", SampleRateIdx);
 		}
 
 		error = RegQueryValueEx(Settingskey, "DecimationIdx", NULL, NULL, (LPBYTE)&DecimationIdx, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall saved Decimation Factor");
-#endif
 			DecimationIdx = 0;
+			DebugLog("ExtIO: Failed to recall DecimationIdx, set to %d", DecimationIdx);
+		}
+		else
+		{
+			DebugLog("ExtIO: DecimationIdx: %d", DecimationIdx);
 		}
 
 		error = RegQueryValueEx(Settingskey, "BandwidthIdx", NULL, NULL, (LPBYTE)&BandwidthIdx, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall saved IF Bandwidth");
-#endif
 			BandwidthIdx = 3;
+			DebugLog("ExtIO: Failed to recall BandwidthIdx, set to %d", BandwidthIdx);
+		}
+		else
+		{
+			DebugLog("ExtIO: BandwidthIdx: %d", BandwidthIdx);
 		}
 
 		if (chosenDev->rspDuoMode == sdrplay_api_RspDuoMode_Single_Tuner)
@@ -3874,18 +3830,20 @@ void LoadSettings()
 			error = RegQueryValueEx(Settingskey, "IFmodeIdx", NULL, NULL, (LPBYTE)&IFmodeIdx, &IntSz);
 			if (error != ERROR_SUCCESS)
 			{
-#ifdef DEBUG_ENABLE
-				OutputDebugString("Failed to recall saved IF mode");
-#endif
 				IFmodeIdx = 1;
+				DebugLog("ExtIO: Failed to recall IFmodeIdx, set to %d", IFmodeIdx);
 				Edit_Enable(GetDlgItem(h_dialog, IDC_IFMODE), 1);
 			}
 			else
+			{
+				DebugLog("ExtIO: IFmodeIdx: %d", IFmodeIdx);
 				Edit_Enable(GetDlgItem(h_dialog, IDC_IFMODE), 1);
+			}
 		}
 		else
 		{
 			IFmodeIdx = 1;
+			DebugLog("ExtIO: Not single tuner: IFmodeIdx: %d", IFmodeIdx);
 			Edit_Enable(GetDlgItem(h_dialog, IDC_IFMODE), 0);
 		}
 
@@ -3894,32 +3852,39 @@ void LoadSettings()
 			error = RegQueryValueEx(Settingskey, "FreqTrim", NULL, NULL, (LPBYTE)&FqOffsetPPM, &IntSz);
 			if (error != ERROR_SUCCESS)
 			{
-#ifdef DEBUG_ENABLE
-				OutputDebugString("Failed to recall saved FreqTrim");
-#endif
 				FqOffsetPPM = 0;
+				DebugLog("ExtIO: Failed to recall FqOffsetPPM, set to %d", FqOffsetPPM);
+			}
+			else
+			{
+				DebugLog("ExtIO: FqOffsetPPM: %d", FqOffsetPPM);
 			}
 		}
 		else
 		{
 			FqOffsetPPM = 0;
+			DebugLog("ExtIO: Slave: FqOffsetPPM: %d", FqOffsetPPM);
 		}
 
 		tempRB = 0;
 		error = RegQueryValueEx(Settingskey, "AGCEnabled", NULL, NULL, (LPBYTE)&tempRB, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall saved AGCEnabled state");
-#endif
+			DebugLog("ExtIO: Failed to recall AGCEnabled, set to false");
 			AGCEnabled = false;
 		}
 		else
 		{
 			if (tempRB == 1)
+			{
+				DebugLog("ExtIO: AGCEnabled: true");
 				AGCEnabled = true;
+			}
 			else
+			{
+				DebugLog("ExtIO: AGCEnabled: false");
 				AGCEnabled = false;
+			}
 		}
 
 		tempRB = 0;
@@ -4029,19 +3994,23 @@ void LoadSettings()
 		error = RegQueryValueEx(Settingskey, "LNAGainReduction", NULL, NULL, (LPBYTE)&LNAGainReduction, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall saved LNAGainReduction value");
-#endif
 			LNAGainReduction = 4;
+			DebugLog("ExtIO: Failed to recall LNAGainReduction, set to %d", LNAGainReduction);
+		}
+		else
+		{
+			DebugLog("ExtIO: LNAGainReduction: %d", LNAGainReduction);
 		}
 
 		error = RegQueryValueEx(Settingskey, "RefClkEnable", NULL, NULL, (LPBYTE)&refClkEnable, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall saved Reference Clock Enable value");
-#endif
 			refClkEnable = 0;
+			DebugLog("ExtIO: Failed to recall refClkEnable, set to %d", refClkEnable);
+		}
+		else
+		{
+			DebugLog("ExtIO: refClkEnable: %d", refClkEnable);
 		}
 
 		if (chosenDev->rspDuoMode != sdrplay_api_RspDuoMode_Slave)
@@ -4049,10 +4018,8 @@ void LoadSettings()
 			error = RegQueryValueEx(Settingskey, "TunerIdx", NULL, NULL, (LPBYTE)&TunerIdx, &IntSz);
 			if (error != ERROR_SUCCESS)
 			{
-#ifdef DEBUG_ENABLE
-				OutputDebugString("Failed to recall saved Tuner Port value");
-#endif
 				TunerIdx = 0; // Tuner
+				DebugLog("ExtIO: Failed to recall TunerIdx, set to %d", TunerIdx);
 				chosenDev->tuner = sdrplay_api_Tuner_A;
 				chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
 			}
@@ -4060,12 +4027,20 @@ void LoadSettings()
 			{
 				if (TunerIdx == 0)
 				{
-					chosenDev->tuner = sdrplay_api_Tuner_A;
+					DebugLog("ExtIO: TunerIdx: %d", TunerIdx);
+					if (chosenDev->tuner != sdrplay_api_Tuner_A)
+					{
+						SwapTuners();
+					}
 					chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
 				}
 				else if (TunerIdx == 1)
 				{
-					chosenDev->tuner = sdrplay_api_Tuner_B;
+					DebugLog("ExtIO: TunerIdx: %d", TunerIdx);
+					if (chosenDev->tuner != sdrplay_api_Tuner_B)
+					{
+						SwapTuners();
+					}
 					chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
 				}
 			}
@@ -4073,11 +4048,15 @@ void LoadSettings()
 		else
 		{
 			if (chosenDev->tuner == sdrplay_api_Tuner_A || chosenDev->tuner == sdrplay_api_Tuner_Both)
+			{
 				TunerIdx = 0;
+				DebugLog("ExtIO: Slave: TunerIdx: %d", TunerIdx);
+			}
 			else
 			{
 				TunerIdx = 1;
 				HiZPort = 0;
+				DebugLog("ExtIO: Slave: TunerIdx: %d, HiZPort: %d", TunerIdx, HiZPort);
 			}
 		}
 
@@ -4086,18 +4065,18 @@ void LoadSettings()
 			error = RegQueryValueEx(Settingskey, "HiZPort", NULL, NULL, (LPBYTE)&HiZPort, &IntSz);
 			if (error != ERROR_SUCCESS)
 			{
-#ifdef DEBUG_ENABLE
-				OutputDebugString("Failed to recall saved HiZ Port value");
-#endif
 				HiZPort = 0;
+				DebugLog("ExtIO: Failed to recall HiZPort, set to %d", HiZPort);
 				if (TunerIdx == 0)
 				{
+					DebugLog("ExtIO: TunerIdx: %d", TunerIdx);
 					Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 1);
 					SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
 					chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
 				}
 				else
 				{
+					DebugLog("ExtIO: TunerIdx: %d", TunerIdx);
 					SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
 					Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 0);
 					chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
@@ -4105,6 +4084,7 @@ void LoadSettings()
 			}
 			else
 			{
+				DebugLog("ExtIO: HiZPort: %d", HiZPort);
 				if (HiZPort == 0)
 				{
 					chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
@@ -4113,6 +4093,7 @@ void LoadSettings()
 				{
 					if (TunerIdx == 0)
 					{
+						DebugLog("ExtIO: TunerIdx: %d", TunerIdx);
 						Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 1);
 						SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
 						chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_1;
@@ -4120,6 +4101,8 @@ void LoadSettings()
 					else
 					{
 						HiZPort = 0;
+						DebugLog("ExtIO: HiZPort: %d", HiZPort);
+						DebugLog("ExtIO: TunerIdx: %d", TunerIdx);
 						SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
 						Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 0);
 						chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
@@ -4132,8 +4115,9 @@ void LoadSettings()
 			if (TunerIdx == 0)
 			{
 				error = RegQueryValueEx(Settingskey, "HiZPort", NULL, NULL, (LPBYTE)&HiZPort, &IntSz);
-				if (error != ERROR_SUCCESS)
+				if (error == ERROR_SUCCESS)
 				{
+					DebugLog("ExtIO: Slave: TunerIdx: %d, HiZPort: %d", TunerIdx, HiZPort);
 					Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 1);
 					SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
 					if (HiZPort == 1)
@@ -4144,6 +4128,7 @@ void LoadSettings()
 				else
 				{
 					HiZPort = 0;
+					DebugLog("ExtIO: Slave: Failed to recall HiZPort, set to %d", HiZPort);
 					Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 1);
 					SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
 					chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
@@ -4152,6 +4137,7 @@ void LoadSettings()
 			else
 			{
 				HiZPort = 0;
+				DebugLog("ExtIO: Slave: TunerIdx: %d, HiZPort: %d", TunerIdx, HiZPort);
 				SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
 				Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 0);
 				chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
@@ -4161,19 +4147,23 @@ void LoadSettings()
 		error = RegQueryValueEx(Settingskey, "NotchEnable", NULL, NULL, (LPBYTE)&notchEnable, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall saved Broadcast Notch value");
-#endif
 			notchEnable = 0;
+			DebugLog("ExtIO: Failed to recall notchEnable, set to %d", notchEnable);
+		}
+		else
+		{
+			DebugLog("ExtIO: notchEnable: %d", notchEnable);
 		}
 
 		error = RegQueryValueEx(Settingskey, "DABNotchEnable", NULL, NULL, (LPBYTE)&dabNotchEnable, &IntSz);
 		if (error != ERROR_SUCCESS)
 		{
-#ifdef DEBUG_ENABLE
-			OutputDebugString("Failed to recall saved DAB Notch value");
-#endif
 			dabNotchEnable = 0;
+			DebugLog("ExtIO: Failed to recall dabNotchEnable, set to %d", dabNotchEnable);
+		}
+		else
+		{
+			DebugLog("ExtIO: dabNotchEnable: %d", dabNotchEnable);
 		}
 
 		error = RegQueryValueEx(Settingskey, "BiasTEnable", NULL, NULL, (LPBYTE)&biasTEnable, &IntSz);
@@ -4183,14 +4173,17 @@ void LoadSettings()
 			OutputDebugString("Failed to recall saved Bias T value");
 #endif
 			biasTEnable = 0;
+			DebugLog("ExtIO: Failed to recall biasTEnable, set to %d", biasTEnable);
+		}
+		else
+		{
+			DebugLog("ExtIO: biasTEnable: %d", biasTEnable);
 		}
 	}
 	else
 	{
 		//If cannot find any registry settings loads some appropriate defaults
-#ifdef DEBUG_ENABLE
-		OutputDebugString("Set Defaults");
-#endif
+		DebugLog("ExtIO: Set Defaults");
 		DcCompensationMode = 3;
 		TrackingPeriod = 20;
 		RefreshPeriodMemory = 2;
@@ -4231,6 +4224,7 @@ void LoadSettings()
 		ITUIndex = 0;
 		TACIndex = 0;
 	}
+	DebugLog("ExtIO: call RegCloseKey");
 	RegCloseKey(Settingskey);
 }
 
@@ -4810,22 +4804,28 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 			}
 
 			if (TunerIdx == 0) {
-				chosenDev->tuner = sdrplay_api_Tuner_A;
-				Edit_Enable(GetDlgItem(hwndDlg, IDC_HIZPORT), 1);
-				if (HiZPort == 0)
+				if (chosenDev->tuner != sdrplay_api_Tuner_A)
 				{
-					chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
-				}
-				else
-				{
-					chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_1;
+					SwapTuners();
+					Edit_Enable(GetDlgItem(hwndDlg, IDC_HIZPORT), 1);
+					if (HiZPort == 0)
+					{
+						chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
+					}
+					else
+					{
+						chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_1;
+					}
 				}
 			}
 			else if (TunerIdx == 1) {
-				Edit_Enable(GetDlgItem(hwndDlg, IDC_HIZPORT), 0);
-				chosenDev->tuner = sdrplay_api_Tuner_B;
-				HiZPort = 0;
-				chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
+				if (chosenDev->tuner != sdrplay_api_Tuner_B)
+				{
+					SwapTuners();
+					Edit_Enable(GetDlgItem(hwndDlg, IDC_HIZPORT), 0);
+					HiZPort = 0;
+					chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
+				}
 			}
 
 			// Broadcast Notch Enable
@@ -5027,19 +5027,35 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 				{
 					if (GET_WM_COMMAND_CMD(wParam, lParam) == BST_UNCHECKED)
 					{
-						if (Button_GetCheck(GET_WM_COMMAND_HWND(wParam, lParam)) == BST_CHECKED) //it is checked
+						if (chosenDev->tuner == sdrplay_api_Tuner_B)
 						{
-							biasTEnable = 1;
-							chParams->rspDuoTunerParams.biasTEnable = (unsigned char)biasTEnable;
-							if (Running)
-								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_BiasTControl, sdrplay_api_Update_Ext1_None);
+							DebugLog("ExtIO: Tuner 2");
+							if (Button_GetCheck(GET_WM_COMMAND_HWND(wParam, lParam)) == BST_CHECKED) //it is checked
+							{
+								DebugLog("ExtIO: BiasT: Enable");
+								biasTEnable = 1;
+								chParams->rspDuoTunerParams.biasTEnable = 1;
+								if (Running)
+								{
+									sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_BiasTControl, sdrplay_api_Update_Ext1_None);
+								}
+							}
+							else
+							{
+								DebugLog("ExtIO: BiasT: Disable");
+								biasTEnable = 0;
+								chParams->rspDuoTunerParams.biasTEnable = 0;
+								if (Running)
+								{
+									sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_BiasTControl, sdrplay_api_Update_Ext1_None);
+								}
+							}
 						}
 						else
 						{
+							DebugLog("ExtIO: TunerA - no BiasT");
+							Button_SetCheck(GET_WM_COMMAND_HWND(wParam, lParam), BST_UNCHECKED);
 							biasTEnable = 0;
-							chParams->rspDuoTunerParams.biasTEnable = (unsigned char)biasTEnable;
-							if (Running)
-								sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_BiasTControl, sdrplay_api_Update_Ext1_None);
 						}
 					}
 					return true;
@@ -5193,6 +5209,13 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 #endif
 					if (TunerIdx == 0 && chosenDev->tuner != sdrplay_api_Tuner_A) // Tuner 1
 					{
+						if (biasTEnable == 1)
+						{
+							chParams->rspDuoTunerParams.biasTEnable = 0;
+							Button_SetCheck(GetDlgItem(hwndDlg, IDC_BIASTENABLE), BST_UNCHECKED);
+							biasTEnable = 0;
+						}
+
 						Edit_Enable(GetDlgItem(h_dialog, IDC_HIZPORT), 1);
 						// LNA Gain Reduction change limit
 						SendMessage(GetDlgItem(hwndDlg, IDC_LNASLIDER), TBM_SETRANGEMAX, (WPARAM)true, (LPARAM)LNA_GAIN_SLIDER_MAX);
@@ -5208,11 +5231,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 							SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
 							chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_1;
 						}
-						if (Running)
-						{
-							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
-						}
-						sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, sdrplay_api_RspDuo_AMPORT_2);
+						SwapTuners();
 					}
 					else if (TunerIdx == 1 && chosenDev->tuner != sdrplay_api_Tuner_B) // Tuner 2
 					{
@@ -5222,11 +5241,7 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 						chParams->rspDuoTunerParams.tuner1AmPortSel = sdrplay_api_RspDuo_AMPORT_2;
 						HiZPort = 0;
 						SendMessage(GetDlgItem(h_dialog, IDC_HIZPORT), BM_SETCHECK, (WPARAM)(0), HiZPort);
-						if (Running)
-						{
-							sdrplay_api_Update_fn(chosenDev->dev, chosenDev->tuner, sdrplay_api_Update_RspDuo_AmPortSelect, sdrplay_api_Update_Ext1_None);
-						}
-						sdrplay_api_SwapRspDuoActiveTuner_fn(chosenDev->dev, &chosenDev->tuner, sdrplay_api_RspDuo_AMPORT_2);
+						SwapTuners();
 					}
 					return true;
 				}
@@ -5241,6 +5256,11 @@ static INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPAR
 						{
 							if (Frequency < 30.0)
 							{
+								if (biasTEnable == 1)
+								{
+									Button_SetCheck(GetDlgItem(hwndDlg, IDC_BIASTENABLE), BST_UNCHECKED);
+									biasTEnable = 0;
+								}
 								HiZPort = 1;
 								// LNA Gain Reduction
 								if (LNAGainReduction > LNA_GAIN_SLIDER_MAX_AM_HIZ)
