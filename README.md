@@ -8,4 +8,6 @@ Note: The RSPdx ExtIO plugin DOES NOT, AND WILL NOT, SUPPORT HDR MODE. Not possi
 
 This source code is all provide as is without support.
 
+The Releases section will contain a installer package which includes API 3.11
+
 SDRplay
