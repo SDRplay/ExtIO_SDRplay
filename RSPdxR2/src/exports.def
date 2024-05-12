@@ -1,0 +1,27 @@
+LIBRARY ExtIO_SDRplay_RSPdxR2
+EXPORTS
+CloseHW
+GetHWLO
+GetHWSR
+GetStatus
+InitHW
+OpenHW
+SetCallback
+SetHWLO
+ShowGUI
+HideGUI
+SwitchGUI
+StartHW
+StopHW
+ExtIoGetSrates
+ExtIoGetActualSrateIdx
+ExtIoSetSrate
+ExtIoGetSetting
+ExtIoSetSetting
+GetAttenuators
+GetActualAttIdx
+SetAttenuator
+TuneChanged
+GetTune
+ModeChanged
+GetMode
